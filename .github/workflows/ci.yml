@@ -149,6 +149,8 @@ jobs:
       - name: Build
         shell: cmd
         run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           call C:\pixi_ws\activate.bat || exit /b 1
           call C:\pixi_ws\ros2-windows\local_setup.bat
           colcon build --merge-install --event-handlers console_cohesion+ --cmake-args -DCMAKE_BUILD_TYPE=Release
@@ -156,6 +158,8 @@ jobs:
       - name: Test
         shell: cmd
         run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           call C:\pixi_ws\activate.bat || exit /b 1
           call C:\pixi_ws\ros2-windows\local_setup.bat
           colcon test --merge-install --event-handlers console_cohesion+ --return-code-on-test-failure || exit /b 1
