@@ -14,16 +14,24 @@ concurrency:
 
 jobs:
   build:
-    name: ROS 2 ${{ matrix.distro }}
-    runs-on: ubuntu-24.04
+    name: ROS 2 ${{ matrix.distro }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     container: ros:${{ matrix.distro }}-ros-base
     strategy:
       fail-fast: false
       matrix:
         distro: [jazzy, lyrical]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     defaults:
       run:
         shell: bash
+    env:
+      ROS_DISTRO_NAME: ${{ matrix.distro }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -33,30 +41,56 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          rosdep update --rosdistro ${{ matrix.distro }}
-          rosdep install --from-paths src --ignore-src -y --rosdistro ${{ matrix.distro }} \
+          rosdep update --rosdistro "$ROS_DISTRO_NAME"
+          rosdep install --from-paths src --ignore-src -y --rosdistro "$ROS_DISTRO_NAME" \
             --skip-keys mcp_cpp_sdk
-          apt-get install -y --no-install-recommends ccache git
+          apt-get install -y --no-install-recommends ccache git \
+            "ros-$ROS_DISTRO_NAME-rmw-cyclonedds-cpp" "ros-$ROS_DISTRO_NAME-rmw-zenoh-cpp"
 
       - uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: ${{ matrix.distro }}
+          key: ${{ matrix.distro }}-${{ matrix.arch }}
 
       - name: Build
         run: |
-          source /opt/ros/${{ matrix.distro }}/setup.bash
+          source "/opt/ros/$ROS_DISTRO_NAME/setup.bash"
           MAKEFLAGS=-j4 colcon build --event-handlers console_cohesion+ --cmake-args \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
-      - name: Test
+      - name: Test with Fast DDS
+        env:
+          RMW_IMPLEMENTATION: rmw_fastrtps_cpp
         run: |
-          source /opt/ros/${{ matrix.distro }}/setup.bash
+          source "/opt/ros/$ROS_DISTRO_NAME/setup.bash"
           colcon test --event-handlers console_cohesion+ --return-code-on-test-failure
           colcon test-result --verbose
 
+      # The unit tests do not use the middleware; the end-to-end tests run again on each one.
+      - name: Test with Cyclone DDS
+        env:
+          RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
+        run: |
+          source "/opt/ros/$ROS_DISTRO_NAME/setup.bash"
+          colcon test --event-handlers console_cohesion+ --return-code-on-test-failure \
+            --ctest-args -R server
+          colcon test-result --verbose
+
+      - name: Test with Zenoh
+        env:
+          RMW_IMPLEMENTATION: rmw_zenoh_cpp
+        run: |
+          source "/opt/ros/$ROS_DISTRO_NAME/setup.bash"
+          ros2 run rmw_zenoh_cpp rmw_zenohd > zenohd.log 2>&1 &
+          router=$!
+          sleep 2
+          colcon test --event-handlers console_cohesion+ --return-code-on-test-failure \
+            --ctest-args -R server
+          colcon test-result --verbose
+          kill "$router"
+
       - name: Smoke-test the binary
         run: |
-          source /opt/ros/${{ matrix.distro }}/setup.bash
+          source "/opt/ros/$ROS_DISTRO_NAME/setup.bash"
           source install/setup.bash
           ros2 run mcp_ros2 mcp_ros2 --version
           ros2 run mcp_ros2 mcp_ros2 --help
