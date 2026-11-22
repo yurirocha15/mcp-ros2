@@ -107,57 +107,57 @@ jobs:
         with:
           path: src/mcp_ros2
 
-      - uses: ros-tooling/setup-ros@v0.7
-        with:
-          required-ros-distributions: ${{ matrix.distro }}
-
-      # setup-ros pins colcon releases whose CMake support imports pkg_resources from setuptools
-      # 59, which fails on the runner's Python 3.12; newer releases load there.
-      - name: Update colcon
-        run: python -m pip install -U --upgrade-strategy eager colcon-common-extensions
-
-      - uses: actions/cache@v6
-        with:
-          path: ~/.conan2/p
-          key: windows-conan-${{ hashFiles('src/mcp_ros2/.github/workflows/ci.yml') }}
-          restore-keys: windows-conan-
-
-      # The ROS archive has neither Boost nor nlohmann/json, and its OpenSSL is 1.1, so the SDK's
-      # dependencies come from Conan; OpenSSL 3 is linked statically, next to ROS's own copy.
-      - name: Install the SDK's dependencies
+      # The steps of the ROS 2 Windows binary install: the dependencies come from the pixi
+      # environment ros2/ros2 publishes for the distribution, ROS 2 from the newest release that
+      # has a Windows archive (not every release does).
+      - name: Get ROS 2
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python -m pip install conan ninja
-          conan profile detect --force
-          @"
-          [requires]
-          boost/1.90.0
-          nlohmann_json/3.12.0
-          openssl/3.6.5
-          [options]
-          boost/*:header_only=True
-          openssl/*:shared=False
-          [generators]
-          CMakeDeps
-          "@ | Set-Content -Path deps.txt
-          conan install deps.txt --output-folder=deps --build=missing -s build_type=Release -s compiler.cppstd=20
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force C:\pixi_ws | Out-Null
+          Invoke-RestMethod https://raw.githubusercontent.com/ros2/ros2/refs/heads/${{ matrix.distro }}/pixi.toml -OutFile C:\pixi_ws\pixi.toml
+          $url = gh api 'repos/ros2/ros2/releases?per_page=100' --jq '[.[] | select(.tag_name | test("^release-${{ matrix.distro }}-[0-9]+$")) | .assets[] | select(.name | test("windows.*\\.zip$"; "i")) | .browser_download_url][0] // empty'
+          if (-not $url) { throw "No ${{ matrix.distro }} release has a Windows archive" }
+          Write-Output "ROS 2: $url"
+          Invoke-WebRequest $url -OutFile ros2.zip
+          7z x ros2.zip -oC:\pixi_ws -y | Out-Null
+          Remove-Item ros2.zip
+
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          pixi-version: v0.84.2
+          manifest-path: C:\pixi_ws\pixi.toml
+          run-install: false
+          cache: false
+
+      # The SDK also needs Boost's headers and nlohmann/json, which the ROS environment may lack.
+      - name: Install the dependencies
+        shell: pwsh
+        working-directory: C:\pixi_ws
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $packages = @('libboost-headers>=1.90,<1.91')
+          if (-not (Select-String -Path pixi.toml -Pattern '^nlohmann_json\s*=' -Quiet)) {
+            $packages += 'nlohmann_json'
+          }
+          pixi add @packages
+          pixi shell-hook --shell cmd | Set-Content -Encoding ascii activate.bat
 
       - name: Build
         shell: cmd
         run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
-          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          call C:\dev\${{ matrix.distro }}\ros2-windows\local_setup.bat
-          colcon build --merge-install --event-handlers console_cohesion+ --cmake-args -G Ninja ^
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON "-DCMAKE_PREFIX_PATH=%CD%\deps"
+          call C:\pixi_ws\activate.bat || exit /b 1
+          call C:\pixi_ws\ros2-windows\local_setup.bat
+          colcon build --merge-install --event-handlers console_cohesion+ --cmake-args -DCMAKE_BUILD_TYPE=Release
 
       - name: Test
         shell: cmd
         run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
-          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          call C:\dev\${{ matrix.distro }}\ros2-windows\local_setup.bat
-          set "PATH=C:\Program Files\OpenSSL-Win64\bin;%PATH%"
+          call C:\pixi_ws\activate.bat || exit /b 1
+          call C:\pixi_ws\ros2-windows\local_setup.bat
           colcon test --merge-install --event-handlers console_cohesion+ --return-code-on-test-failure || exit /b 1
           colcon test-result --verbose
 
