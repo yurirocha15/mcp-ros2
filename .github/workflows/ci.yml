@@ -111,6 +111,11 @@ jobs:
         with:
           required-ros-distributions: ${{ matrix.distro }}
 
+      # setup-ros pins colcon releases whose CMake support imports pkg_resources from setuptools
+      # 59, which fails on the runner's Python 3.12; newer releases load there.
+      - name: Update colcon
+        run: python -m pip install -U --upgrade-strategy eager colcon-common-extensions
+
       - uses: actions/cache@v6
         with:
           path: ~/.conan2/p
