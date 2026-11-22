@@ -104,6 +104,11 @@ class ActionGoal {
     [[nodiscard]] nlohmann::json last_feedback() const;
     /// "succeeded", "aborted", "canceled" or "unknown", once finished.
     [[nodiscard]] std::string status() const;
+    /// The status now: before it finishes "sent", "accepted", "executing" or "canceling", and
+    /// then status().
+    [[nodiscard]] std::string current_status() const;
+    /// The goal's ID, as a UUID.
+    [[nodiscard]] const std::string& id() const { return id_; }
     /// The result, once finished.
     [[nodiscard]] nlohmann::json result() const;
     /// Asks the server to cancel the goal, once it is accepted.
@@ -123,6 +128,7 @@ class ActionGoal {
     };
     rclcpp_action::GenericClient::SharedPtr client_;
     std::shared_ptr<const ActionType> type_;
+    std::string id_;
     std::shared_ptr<State> state_ = std::make_shared<State>();
     std::shared_future<rclcpp_action::GenericClientGoalHandle::SharedPtr> handle_;
 };

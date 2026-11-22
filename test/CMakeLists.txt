@@ -3,7 +3,8 @@ find_package(example_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(test_msgs REQUIRED)
 
-ament_add_gtest(mcp_ros2_unit_tests message_json_test.cpp options_test.cpp)
+ament_add_gtest(mcp_ros2_unit_tests access_test.cpp message_json_test.cpp
+                options_test.cpp)
 target_link_libraries(mcp_ros2_unit_tests mcp_ros2_core)
 
 # Each test starts the server and waits for discovery; the domain is kept to

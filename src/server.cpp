@@ -1,5 +1,7 @@
 #include "server.hpp"
 
+#include "access.hpp"
+
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
@@ -9,6 +11,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <deque>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -24,10 +27,8 @@ using nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
 constexpr auto g_POLL_INTERVAL = std::chrono::milliseconds(20);
-constexpr auto g_NOTIFY_INTERVAL = std::chrono::seconds(1);
 constexpr auto g_CLOSE_WAIT = std::chrono::seconds(5);
-constexpr double g_RESOURCE_WAIT_SECONDS = 3;
-constexpr double g_DISCOVERY_SECONDS = 1.5;
+constexpr std::size_t g_MAX_GOALS = 100;
 constexpr std::size_t g_HZ_SAMPLES = 200000;
 constexpr std::size_t g_PROGRESS_TEXT = 200;
 
@@ -239,19 +240,6 @@ std::string stopped(const mcp::Context& ctx, double timeout) {
                               : "nothing came within " + number_text(timeout) + " s";
 }
 
-/// Waits out the first moments of the node, in which discovery is still filling in the graph, so
-/// that the first listing an agent asks for is not empty.
-mcp::Task<void> settle(mcp::Context& ctx, const Ros& ros) {
-    co_await wait_until(ctx, ros.started() + seconds(g_DISCOVERY_SECONDS), [] { return false; });
-}
-
-using GraphQuery = std::function<json(const json&)>;
-
-mcp::Task<json> query_graph(mcp::Context& ctx, Ros& ros, GraphQuery query, json args) {
-    co_await settle(ctx, ros);
-    co_return query(args);
-}
-
 // Messages.
 
 /// The part of @p message at the dotted @p path, such as pose.position or ranges.0.
@@ -301,12 +289,82 @@ json select_field(const json& message, const std::string& path) {
     return *at;
 }
 
-// The tools. Each runs as a coroutine on the handler thread; the ROS node's own thread delivers
-// what they wait for.
+}  // namespace
 
-mcp::Task<json> echo(mcp::Context& ctx, Ros& ros, json args) {
+/// What the tools share: the node, the rules for the tools that act, and the goals sent without
+/// waiting for their results.
+struct RosTools::Shared {
+    struct Goal {
+        std::string action;
+        std::string type;
+        std::shared_ptr<ActionGoal> goal;
+        Clock::time_point sent;
+    };
+
+    Shared(Ros& ros_ref, const Options& options)
+        : ros(ros_ref), access(options.allow, options.deny), discovery_wait(options.discovery_wait) {}
+
+    /// Keeps @p goal to be followed by its ID. The oldest goal is forgotten past g_MAX_GOALS,
+    /// a finished one first; forgetting a goal does not stop it.
+    void add_goal(Goal goal) {
+        const std::lock_guard lock(mutex_);
+        if (goals_.size() >= g_MAX_GOALS) {
+            const auto finished = std::find_if(goals_.begin(), goals_.end(),
+                                               [](const Goal& kept) { return kept.goal->finished(); });
+            goals_.erase(finished != goals_.end() ? finished : goals_.begin());
+        }
+        goals_.push_back(std::move(goal));
+    }
+
+    std::optional<Goal> goal(const std::string& id) {
+        const std::lock_guard lock(mutex_);
+        for (const Goal& kept : goals_) {
+            if (kept.goal->id() == id) {
+                return kept;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::vector<Goal> goals() {
+        const std::lock_guard lock(mutex_);
+        return {goals_.begin(), goals_.end()};
+    }
+
+    Ros& ros;
+    const AccessRules access;
+    const double discovery_wait;
+
+   private:
+    std::mutex mutex_;
+    std::deque<Goal> goals_;
+};
+
+namespace {
+
+using Tools = std::shared_ptr<RosTools::Shared>;
+
+/// Waits out the first moments of the node, in which discovery is still filling in the graph, so
+/// that the first listing an agent asks for is not empty.
+mcp::Task<void> settle(mcp::Context& ctx, const RosTools::Shared& tools) {
+    co_await wait_until(ctx, tools.ros.started() + seconds(tools.discovery_wait), [] { return false; });
+}
+
+using GraphQuery = std::function<json(const json&)>;
+
+mcp::Task<json> query_graph(mcp::Context& ctx, Tools tools, GraphQuery query, json args) {
+    co_await settle(ctx, *tools);
+    co_return query(args);
+}
+
+// The tools. Each runs as a coroutine on the handler thread; the ROS node's own thread delivers
+// what they wait for. Each holds the shared state, so a call still running when the server stops
+// keeps what it uses.
+
+mcp::Task<json> echo(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string topic = qualified_name(required_string(args, "topic"));
-    co_await settle(ctx, ros);
+    co_await settle(ctx, *tools);
     const auto type = ros.topic_type(topic, string_arg(args, "type"));
     const std::size_t count = count_arg(args, "count", 1, 100).value_or(1);
     const double timeout = number_arg(args, "timeout", 0.1, 300).value_or(5);
@@ -339,9 +397,10 @@ mcp::Task<json> echo(mcp::Context& ctx, Ros& ros, json args) {
     co_return out;
 }
 
-mcp::Task<json> topic_hz(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> topic_hz(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string topic = qualified_name(required_string(args, "topic"));
-    co_await settle(ctx, ros);
+    co_await settle(ctx, *tools);
     const auto type = ros.topic_type(topic, string_arg(args, "type"));
     const double window = number_arg(args, "seconds", 0.5, 60).value_or(5);
 
@@ -398,9 +457,11 @@ mcp::Task<json> topic_hz(mcp::Context& ctx, Ros& ros, json args) {
     co_return out;
 }
 
-mcp::Task<json> publish(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> publish(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string topic = qualified_name(required_string(args, "topic"));
-    co_await settle(ctx, ros);
+    tools->access.check("publish on", topic);
+    co_await settle(ctx, *tools);
     const auto type = ros.topic_type(topic, string_arg(args, "type"));
     const json message = object_arg(args, "message");
     const std::size_t times = count_arg(args, "times", 1, 1000).value_or(1);
@@ -438,9 +499,11 @@ mcp::Task<json> publish(mcp::Context& ctx, Ros& ros, json args) {
     co_return out;
 }
 
-mcp::Task<json> call_service(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> call_service(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string service = qualified_name(required_string(args, "service"));
-    co_await settle(ctx, ros);
+    tools->access.check("call", service);
+    co_await settle(ctx, *tools);
     const auto type = ros.service_type(service, string_arg(args, "type"));
     const json request = object_arg(args, "request");
     const double timeout = number_arg(args, "timeout", 0.1, 300).value_or(10);
@@ -458,9 +521,11 @@ mcp::Task<json> call_service(mcp::Context& ctx, Ros& ros, json args) {
     co_return json{{"service", service}, {"type", type->name}, {"response", ros.response_json(call)}};
 }
 
-mcp::Task<json> send_action_goal(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> send_action_goal(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string action = qualified_name(required_string(args, "action"));
-    co_await settle(ctx, ros);
+    tools->access.check("send goals to", action);
+    co_await settle(ctx, *tools);
     const auto type = ros.action_type(action, string_arg(args, "type"));
     const json goal_fields = object_arg(args, "goal");
     const double timeout = number_arg(args, "timeout", 1, 3600).value_or(120);
@@ -479,6 +544,14 @@ mcp::Task<json> send_action_goal(mcp::Context& ctx, Ros& ros, json args) {
     json out{{"action", action}, {"type", type->name}, {"accepted", goal->accepted()}};
     if (!goal->accepted()) {
         out["note"] = "The action server rejected the goal.";
+        co_return out;
+    }
+    if (!args.value("wait", true)) {
+        tools->add_goal({action, type->name, goal, Clock::now()});
+        out["goal_id"] = goal->id();
+        out["status"] = goal->current_status();
+        out["note"] =
+            "The goal runs on: action_goal_status follows it, and cancel_action_goal stops it.";
         co_return out;
     }
 
@@ -531,7 +604,8 @@ mcp::Task<T> parameter_result(mcp::Context& ctx, ParameterCall<T> call, const st
     co_return call.future.get();
 }
 
-mcp::Task<json> get_parameters(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> get_parameters(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string node = qualified_name(required_string(args, "node"));
     std::vector<std::string> names;
     if (const auto it = args.find("names"); it != args.end() && it->is_array()) {
@@ -562,8 +636,10 @@ mcp::Task<json> get_parameters(mcp::Context& ctx, Ros& ros, json args) {
     co_return json{{"node", node}, {"parameters", std::move(values)}};
 }
 
-mcp::Task<json> set_parameters(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> set_parameters(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string node = qualified_name(required_string(args, "node"));
+    tools->access.check("set parameters of", node);
     const json wanted = object_arg(args, "parameters");
     if (wanted.empty()) {
         throw std::invalid_argument("parameters must name at least one parameter");
@@ -607,7 +683,8 @@ mcp::Task<json> set_parameters(mcp::Context& ctx, Ros& ros, json args) {
     co_return json{{"node", node}, {"results", std::move(out)}};
 }
 
-mcp::Task<json> lookup_transform(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> lookup_transform(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const std::string target = required_string(args, "target_frame");
     const std::string source = required_string(args, "source_frame");
     const double timeout = number_arg(args, "timeout", 0, 60).value_or(2);
@@ -623,7 +700,8 @@ mcp::Task<json> lookup_transform(mcp::Context& ctx, Ros& ros, json args) {
     co_return *found;
 }
 
-mcp::Task<json> list_frames(mcp::Context& ctx, Ros& ros, json args) {
+mcp::Task<json> list_frames(mcp::Context& ctx, Tools tools, json args) {
+    Ros& ros = tools->ros;
     const double wait = number_arg(args, "wait", 0, 30).value_or(1);
     ros.listen_to_transforms();
     // Frames arrive as their transforms are published; static ones at once.
@@ -631,13 +709,87 @@ mcp::Task<json> list_frames(mcp::Context& ctx, Ros& ros, json args) {
     co_return json{{"frames", ros.frames()}};
 }
 
+json goal_json(const RosTools::Shared::Goal& kept, bool details) {
+    const ActionGoal& goal = *kept.goal;
+    json out{{"goal_id", goal.id()},
+             {"action", kept.action},
+             {"type", kept.type},
+             {"status", goal.current_status()},
+             {"seconds", rounded(std::chrono::duration<double>(Clock::now() - kept.sent).count(), 1)},
+             {"feedback_count", goal.feedback_count()}};
+    if (details) {
+        if (goal.feedback_count() > 0) {
+            out["last_feedback"] = goal.last_feedback();
+        }
+        if (goal.finished()) {
+            out["result"] = goal.result();
+        }
+    }
+    return out;
+}
+
+RosTools::Shared::Goal kept_goal(RosTools::Shared& tools, const std::string& id) {
+    auto kept = tools.goal(id);
+    if (!kept) {
+        throw std::invalid_argument(
+            "There is no goal " + id +
+            " sent with wait false; action_goal_status without goal_id lists them");
+    }
+    return std::move(*kept);
+}
+
+mcp::Task<json> action_goal_status(mcp::Context& ctx, Tools tools, json args) {
+    const auto id = string_arg(args, "goal_id");
+    if (!id) {
+        json goals = json::array();
+        for (const auto& kept : tools->goals()) {
+            goals.push_back(goal_json(kept, false));
+        }
+        co_return json{{"goals", std::move(goals)}};
+    }
+    const auto kept = kept_goal(*tools, *id);
+    const double wait = number_arg(args, "wait", 0, 3600).value_or(0);
+    if (wait > 0) {
+        const ActionGoal& goal = *kept.goal;
+        co_await wait_until(
+            ctx, Clock::now() + seconds(wait), [&goal] { return goal.finished(); },
+            [&goal]() -> std::optional<Progress> {
+                const std::size_t count = goal.feedback_count();
+                if (count == 0) {
+                    return std::nullopt;
+                }
+                return Progress{static_cast<double>(count), std::nullopt,
+                                shortened(goal.last_feedback().dump())};
+            });
+    }
+    co_return goal_json(kept, true);
+}
+
+mcp::Task<json> cancel_action_goal(mcp::Context& ctx, Tools tools, json args) {
+    const auto kept = kept_goal(*tools, required_string(args, "goal_id"));
+    tools->access.check("cancel goals of", kept.action);
+    const double timeout = number_arg(args, "timeout", 0, 60).value_or(5);
+    kept.goal->cancel();
+    co_await wait_until(ctx, Clock::now() + seconds(timeout),
+                        [&kept] { return kept.goal->finished(); });
+    json out = goal_json(kept, true);
+    if (!kept.goal->finished()) {
+        out["note"] = "The action server has not finished the goal yet; action_goal_status follows it.";
+    }
+    co_return out;
+}
+
 }  // namespace
 
 // Resources: the graph, and the newest message on each topic.
 
 struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
-    Watches(mcp::Server& server_ref, Ros& ros_ref, Spawn spawn_fn)
-        : server(server_ref), ros(ros_ref), spawn(std::move(spawn_fn)) {}
+    Watches(mcp::Server& server_ref, Ros& ros_ref, Spawn spawn_fn, const Options& options)
+        : server(server_ref),
+          ros(ros_ref),
+          spawn(std::move(spawn_fn)),
+          resource_wait(options.resource_wait),
+          notify_interval(seconds(options.notify_interval)) {}
 
     struct Watch {
         std::size_t subscribers = 0;
@@ -709,6 +861,8 @@ struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
     mcp::Server& server;
     Ros& ros;
     Spawn spawn;
+    const double resource_wait;
+    const Clock::duration notify_interval;
     std::mutex mutex;
     std::map<std::string, Watch> by_uri;
     std::mutex notice_mutex;
@@ -740,7 +894,8 @@ struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
                 {
                     const std::lock_guard lock(last->first);
                     const auto now = Clock::now();
-                    if (last->second != Clock::time_point{} && now - last->second < g_NOTIFY_INTERVAL) {
+                    if (last->second != Clock::time_point{} &&
+                        now - last->second < watches->notify_interval) {
                         return;
                     }
                     last->second = now;
@@ -782,7 +937,7 @@ mcp::Task<mcp::ReadResourceResult> read_topic(mcp::Context& ctx,
         auto tap = watches->tap(uri);
         if (!tap || !tap->latest()) {
             tap = ros.tap(*topic, ros.topic_type(*topic, std::nullopt), 1, true, {});
-            co_await wait_until(ctx, Clock::now() + seconds(g_RESOURCE_WAIT_SECONDS),
+            co_await wait_until(ctx, Clock::now() + seconds(watches->resource_wait),
                                 [&tap] { return tap->count() > 0; });
         }
         body = json{{"topic", *topic}, {"type", tap->type()->name}};
@@ -790,7 +945,7 @@ mcp::Task<mcp::ReadResourceResult> read_topic(mcp::Context& ctx,
             body["message"] = ros.message_json(*tap, *latest, ros.limits());
         } else {
             body["message"] = nullptr;
-            body["note"] = "No message within " + number_text(g_RESOURCE_WAIT_SECONDS) + " s";
+            body["note"] = "No message within " + number_text(watches->resource_wait) + " s";
         }
     } catch (const std::exception& error) {
         body = json{{"error", error.what()}};
@@ -807,20 +962,21 @@ mcp::Task<mcp::ReadResourceResult> read_topic(mcp::Context& ctx,
 }  // namespace
 
 RosTools::RosTools(mcp::Server& server, Ros& ros, const Options& options, Spawn spawn)
-    : watches_(std::make_shared<Watches>(server, ros, std::move(spawn))) {
+    : shared_(std::make_shared<Shared>(ros, options)),
+      watches_(std::make_shared<Watches>(server, ros, std::move(spawn), options)) {
     server.set_instructions(server_instructions(options));
-    const auto add = [&server, &ros](mcp::Tool definition,
-                                     mcp::Task<json> (*run)(mcp::Context&, Ros&, json)) {
+    const auto add = [&server, tools = shared_](mcp::Tool definition,
+                                                mcp::Task<json> (*run)(mcp::Context&, Tools, json)) {
         server.add_tool(std::move(definition),
-                        [&ros, run](mcp::Context& ctx, const json& args) -> mcp::Task<json> {
-                            return run(ctx, ros, args);
+                        [tools, run](mcp::Context& ctx, const json& args) -> mcp::Task<json> {
+                            return run(ctx, tools, args);
                         });
     };
-    const auto add_query = [&server, &ros](mcp::Tool definition, GraphQuery query) {
+    const auto add_query = [&server, tools = shared_](mcp::Tool definition, GraphQuery query) {
         server.add_tool(
             std::move(definition),
-            [&ros, query = std::move(query)](mcp::Context& ctx, const json& args) -> mcp::Task<json> {
-                return query_graph(ctx, ros, query, args);
+            [tools, query = std::move(query)](mcp::Context& ctx, const json& args) -> mcp::Task<json> {
+                return query_graph(ctx, tools, query, args);
             });
     };
 
@@ -1018,19 +1174,51 @@ RosTools::RosTools(mcp::Server& server, Ros& ros, const Options& options, Spawn 
         add(tool("send_action_goal", "Send an action goal",
                  "Sends a goal to an action server and waits for its result, reporting feedback as "
                  "progress. A goal still running at the timeout, or when the call is cancelled, is "
-                 "cancelled. This acts on the running system: a navigation goal moves a robot.",
+                 "cancelled. With wait false it returns once the goal is accepted, with a goal_id for "
+                 "action_goal_status and cancel_action_goal, and the goal runs on: use that for goals "
+                 "that take longer than a call should. This acts on the running system: a navigation "
+                 "goal moves a robot.",
                  object_schema(
                      {{"action", property("string", "The action, such as /navigate_to_pose")},
                       {"type", property("string", "The action type, when the graph does not know it")},
                       {"goal", property("object", "The goal fields")},
+                      {"wait", property("boolean", "Wait for the result (default true)")},
                       {"timeout",
                        {{"type", "number"},
                         {"minimum", 1},
                         {"maximum", 3600},
-                        {"description", "Seconds to wait for the result (default 120)"}}}},
+                        {"description",
+                         "Seconds to wait for acceptance and, with wait, the result "
+                         "(default 120)"}}}},
                      {"action"}),
                  g_ACTS),
             send_action_goal);
+        add(tool("action_goal_status", "Follow an action goal",
+                 "The status, newest feedback and, once finished, result of a goal sent with wait "
+                 "false. wait waits for the goal to finish, reporting feedback as progress. Without "
+                 "goal_id, lists the goals sent that way.",
+                 object_schema(
+                     {{"goal_id", property("string", "The goal_id send_action_goal returned")},
+                      {"wait",
+                       {{"type", "number"},
+                        {"minimum", 0},
+                        {"maximum", 3600},
+                        {"description", "Seconds to wait for the goal to finish (default 0)"}}}}),
+                 g_READS),
+            action_goal_status);
+        add(tool("cancel_action_goal", "Cancel an action goal",
+                 "Asks the action server to cancel a goal sent with wait false, and waits for it to "
+                 "finish. This acts on the running system.",
+                 object_schema(
+                     {{"goal_id", property("string", "The goal_id send_action_goal returned")},
+                      {"timeout",
+                       {{"type", "number"},
+                        {"minimum", 0},
+                        {"maximum", 60},
+                        {"description", "Seconds to wait for the goal to finish (default 5)"}}}},
+                     {"goal_id"}),
+                 g_ACTS),
+            cancel_action_goal);
         add(tool("set_parameters", "Set parameters",
                  "Sets parameters of a node. Values take the parameter's current type. This acts on "
                  "the running system.",
@@ -1095,11 +1283,15 @@ std::string server_instructions(const Options& options) {
         text +=
             " This server is read-only: it does not publish, call services, send goals or set "
             "parameters.";
-    } else {
-        text +=
-            " publish, call_service, send_action_goal and set_parameters act on the running system, "
-            "which may move a robot: check the topic, type and values with the user before moving "
-            "real hardware.";
+        return text;
+    }
+    text +=
+        " publish, call_service, send_action_goal, cancel_action_goal and set_parameters act on the "
+        "running system, which may move a robot: check the topic, type and values with the user "
+        "before moving real hardware. A goal that takes long can be sent with wait false and followed "
+        "with action_goal_status.";
+    if (const AccessRules access(options.allow, options.deny); access.limited()) {
+        text += " " + access.describe();
     }
     return text;
 }

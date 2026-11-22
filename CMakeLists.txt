@@ -14,6 +14,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rcl REQUIRED)
 find_package(rcl_action REQUIRED)
@@ -69,8 +70,8 @@ configure_file(src/version.hpp.in
                "${CMAKE_CURRENT_BINARY_DIR}/generated/version.hpp" @ONLY)
 
 add_library(
-  mcp_ros2_core STATIC src/message_json.cpp src/options.cpp src/ros_bridge.cpp
-                       src/server.cpp src/type_support.cpp)
+  mcp_ros2_core STATIC src/access.cpp src/message_json.cpp src/options.cpp
+                       src/ros_bridge.cpp src/server.cpp src/type_support.cpp)
 target_include_directories(
   mcp_ros2_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
                        "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -78,6 +79,7 @@ target_link_libraries(
   mcp_ros2_core
   PUBLIC
     ${_mcp_sdk}
+    ${action_msgs_TARGETS}
     ${geometry_msgs_TARGETS}
     ${rcl_interfaces_TARGETS}
     rcl::rcl
@@ -91,11 +93,16 @@ target_link_libraries(
     rosidl_typesupport_introspection_cpp::rosidl_typesupport_introspection_cpp
     tf2::tf2
     tf2_ros::tf2_ros)
-target_compile_options(mcp_ros2_core PRIVATE -Wall -Wextra -Wpedantic)
+if(MSVC)
+  set(_mcp_ros2_warnings /W4)
+else()
+  set(_mcp_ros2_warnings -Wall -Wextra -Wpedantic)
+endif()
+target_compile_options(mcp_ros2_core PRIVATE ${_mcp_ros2_warnings})
 
 add_executable(mcp_ros2 src/main.cpp)
 target_link_libraries(mcp_ros2 PRIVATE mcp_ros2_core)
-target_compile_options(mcp_ros2 PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(mcp_ros2 PRIVATE ${_mcp_ros2_warnings})
 
 install(TARGETS mcp_ros2 RUNTIME DESTINATION lib/${PROJECT_NAME})
 

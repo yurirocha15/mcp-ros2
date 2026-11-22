@@ -29,6 +29,14 @@ ParseResult error(std::string message) {
     return result;
 }
 
+std::optional<double> parse_seconds(std::string_view text, double low, double high) {
+    const auto value = parse_number<double>(text);
+    if (!value || !(*value >= low && *value <= high)) {
+        return std::nullopt;
+    }
+    return value;
+}
+
 bool is_node_name(std::string_view name) {
     if (name.empty() ||
         (std::isalpha(static_cast<unsigned char>(name.front())) == 0 && name.front() != '_')) {
@@ -54,15 +62,34 @@ std::string usage(std::string_view program) {
         << "\n"
         << "Options:\n"
         << "  --read-only                Leave out the tools that change the system: publish,\n"
-        << "                             call_service, send_action_goal and set_parameters\n"
+        << "                             call_service, send_action_goal, cancel_action_goal,\n"
+        << "                             action_goal_status and set_parameters\n"
         << "  --node-name=<name>         The server's node name (default: mcp_ros2)\n"
+        << "  --allow=<pattern>          Let the tools that change the system touch only\n"
+        << "                             matching names; repeat for more. * matches within a\n"
+        << "                             part of a name, ** across parts: /robot1/**\n"
+        << "  --deny=<pattern>           Never let them touch matching names; repeat for more\n"
         << "  --max-array=<n>            Shorten arrays longer than this in returned messages\n"
         << "                             (default: 64)\n"
+        << "  --discovery-wait=<s>       Seconds after start that graph queries wait for\n"
+        << "                             discovery (default: 1.5)\n"
+        << "  --resource-wait=<s>        Seconds a topic resource read waits for a message\n"
+        << "                             (default: 3)\n"
+        << "  --notify-interval=<s>      Least seconds between notices of new messages on a\n"
+        << "                             subscribed topic (default: 1)\n"
         << "  --transport=<stdio|http>   How clients connect (default: stdio)\n"
         << "  --host=<address>           HTTP listen address (default: 127.0.0.1)\n"
         << "  --port=<n>                 HTTP listen port (default: 9797)\n"
         << "  --token=<token>            Bearer token HTTP clients must send\n"
-        << "                             (default: $MCP_ROS2_TOKEN; required off loopback)\n"
+        << "                             (default: $MCP_ROS2_TOKEN)\n"
+        << "  --tls-cert=<file>          Serve HTTPS with this PEM certificate chain\n"
+        << "  --tls-key=<file>           The PEM private key of --tls-cert\n"
+        << "  --tls-client-ca=<file>     Require client certificates from this PEM authority;\n"
+        << "                             repeat for more\n"
+        << "\n"
+        << "Off loopback, HTTP needs a token or client certificates.\n"
+        << "\n"
+        << "Other options:\n"
         << "  --version                  Print the version\n"
         << "  --help                     Print this help\n"
         << "\n"
@@ -81,6 +108,7 @@ ParseResult parse_options(const std::vector<std::string>& args) {
         options.token = token;
     }
     const std::string_view program = args.empty() ? "mcp-ros2" : std::string_view(args.front());
+    bool token_given = false;
 
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string_view arg = args[i];
@@ -132,16 +160,64 @@ ParseResult parse_options(const std::vector<std::string>& args) {
             options.port = *parsed;
         } else if (auto value = value_of("--token=")) {
             options.token = std::string(*value);
+            token_given = true;
+        } else if (auto value = value_of("--allow=")) {
+            if (value->empty()) {
+                return error("--allow needs a name pattern");
+            }
+            options.allow.emplace_back(*value);
+        } else if (auto value = value_of("--deny=")) {
+            if (value->empty()) {
+                return error("--deny needs a name pattern");
+            }
+            options.deny.emplace_back(*value);
+        } else if (auto value = value_of("--discovery-wait=")) {
+            const auto parsed = parse_seconds(*value, 0, 300);
+            if (!parsed) {
+                return error("Invalid --discovery-wait (0 to 300 seconds): " + std::string(*value));
+            }
+            options.discovery_wait = *parsed;
+        } else if (auto value = value_of("--resource-wait=")) {
+            const auto parsed = parse_seconds(*value, 0, 300);
+            if (!parsed) {
+                return error("Invalid --resource-wait (0 to 300 seconds): " + std::string(*value));
+            }
+            options.resource_wait = *parsed;
+        } else if (auto value = value_of("--notify-interval=")) {
+            const auto parsed = parse_seconds(*value, 0, 3600);
+            if (!parsed) {
+                return error("Invalid --notify-interval (0 to 3600 seconds): " + std::string(*value));
+            }
+            options.notify_interval = *parsed;
+        } else if (auto value = value_of("--tls-cert=")) {
+            options.tls_certificate = std::string(*value);
+        } else if (auto value = value_of("--tls-key=")) {
+            options.tls_key = std::string(*value);
+        } else if (auto value = value_of("--tls-client-ca=")) {
+            if (value->empty()) {
+                return error("--tls-client-ca needs a file");
+            }
+            options.tls_client_cas.emplace_back(std::string(*value));
         } else {
             return error("Unknown option: " + std::string(arg));
         }
     }
 
+    const bool tls = !options.tls_certificate.empty() || !options.tls_key.empty();
+    if (tls && (options.tls_certificate.empty() || options.tls_key.empty())) {
+        return error("HTTPS needs both --tls-cert and --tls-key");
+    }
+    if (!options.tls_client_cas.empty() && !tls) {
+        return error("--tls-client-ca needs --tls-cert and --tls-key");
+    }
+    if ((tls || token_given) && options.transport != Transport::eHttp) {
+        return error("--token and the TLS options need --transport=http");
+    }
     if (options.transport == Transport::eHttp && !is_loopback_host(options.host) &&
-        options.token.empty()) {
-        return error(
-            "Listening on " + options.host +
-            " lets other machines call the server; set a token with --token or MCP_ROS2_TOKEN");
+        options.token.empty() && options.tls_client_cas.empty()) {
+        return error("Listening on " + options.host +
+                     " lets other machines call the server; set a token with --token or "
+                     "MCP_ROS2_TOKEN, or require client certificates with --tls-client-ca");
     }
     ParseResult result;
     result.options = std::move(options);

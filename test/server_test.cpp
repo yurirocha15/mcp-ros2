@@ -3,6 +3,8 @@
 // service, an action, parameters and a static transform.
 
 #include <mcp/mcp.hpp>
+#include <mcp/transport/http_client.hpp>
+#include <mcp/transport/tls.hpp>
 
 #include <example_interfaces/action/fibonacci.hpp>
 #include <example_interfaces/srv/add_two_ints.hpp>
@@ -15,11 +17,24 @@
 #include <tf2_ros/static_transform_broadcaster.hpp>
 
 #include <gtest/gtest.h>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/tcp.hpp>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#include <unistd.h>
+#include <csignal>
+#endif
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <mutex>
+#include <numbers>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -83,8 +98,8 @@ class Robot {
         transform.child_frame_id = "base_link";
         transform.transform.translation.x = 1.0;
         transform.transform.translation.y = 2.0;
-        transform.transform.rotation.z = std::sin(M_PI / 4);
-        transform.transform.rotation.w = std::cos(M_PI / 4);
+        transform.transform.rotation.z = std::sin(std::numbers::pi / 4);
+        transform.transform.rotation.w = std::cos(std::numbers::pi / 4);
         broadcaster_->sendTransform(transform);
 
         executor_.add_node(node_);
@@ -205,6 +220,76 @@ bool wait_for(Ready ready, std::chrono::seconds timeout = 10s) {
     return true;
 }
 
+/// A program run next to the test, stopped when this goes away.
+class Child {
+   public:
+    explicit Child(const std::vector<std::string>& command) {
+#ifdef _WIN32
+        std::string line;
+        for (const std::string& arg : command) {
+            line += (line.empty() ? "\"" : " \"") + arg + "\"";
+        }
+        STARTUPINFOA startup{};
+        startup.cb = sizeof startup;
+        if (CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup,
+                           &process_) == 0) {
+            throw std::runtime_error("cannot start " + command.front());
+        }
+#else
+        std::vector<char*> argv;
+        for (const std::string& arg : command) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
+        }
+        argv.push_back(nullptr);
+        pid_ = ::fork();
+        if (pid_ == 0) {
+            ::execv(argv[0], argv.data());
+            ::_exit(127);
+        }
+        if (pid_ < 0) {
+            throw std::runtime_error("cannot start " + command.front());
+        }
+#endif
+    }
+
+    ~Child() {
+#ifdef _WIN32
+        TerminateProcess(process_.hProcess, 1);
+        WaitForSingleObject(process_.hProcess, INFINITE);
+        CloseHandle(process_.hThread);
+        CloseHandle(process_.hProcess);
+#else
+        ::kill(pid_, SIGINT);
+        int status = 0;
+        for (int i = 0; i < 100; ++i) {
+            if (::waitpid(pid_, &status, WNOHANG) == pid_) {
+                return;
+            }
+            std::this_thread::sleep_for(100ms);
+        }
+        ::kill(pid_, SIGKILL);
+        ::waitpid(pid_, &status, 0);
+#endif
+    }
+
+    Child(const Child&) = delete;
+    Child& operator=(const Child&) = delete;
+
+   private:
+#ifdef _WIN32
+    PROCESS_INFORMATION process_{};
+#else
+    pid_t pid_ = -1;
+#endif
+};
+
+std::uint16_t free_port() {
+    boost::asio::io_context io;
+    const boost::asio::ip::tcp::acceptor acceptor(
+        io, boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0));
+    return acceptor.local_endpoint().port();
+}
+
 class ServerTest : public ::testing::Test {
    protected:
     /// Starts the server and waits until it sees the robot's topics, service and action.
@@ -218,7 +303,8 @@ class ServerTest : public ::testing::Test {
         client_ = std::make_unique<mcp::Client>(mcp::Endpoint::stdio(command), options);
         client_->sync().connect("mcp-ros2-test", "1.0.0");
         ASSERT_TRUE(wait_for([this] {
-            return contains_name(call("list_topics")["topics"], "/chatter") &&
+            return contains_name(call("list_nodes")["nodes"], "/test_robot") &&
+                   contains_name(call("list_topics")["topics"], "/chatter") &&
                    contains_name(call("list_topics")["topics"], "/commands") &&
                    contains_name(call("list_services")["services"], "/add_two_ints") &&
                    contains_name(call("list_actions")["actions"], "/fibonacci");
@@ -475,6 +561,104 @@ TEST_F(ServerTest, NotifiesSubscribersOfNewMessages) {
     // At most one notice a second.
     EXPECT_TRUE(wait_for([&updates] { return updates >= 2; }, 5s)) << updates;
     client_->sync().send_request("resources/unsubscribe", json{{"uri", "ros://topic/chatter"}});
+}
+
+TEST_F(ServerTest, AllowAndDenyLimitWhatActs) {
+    connect({"--allow=/commands", "--allow=/add_*", "--deny=/add_two_ints"});
+    call("publish", {{"topic", "/commands"}, {"message", {{"linear", {{"x", 0.25}}}}}});
+    EXPECT_NE(call_error("publish", {{"topic", "/stamped"}, {"message", json::object()}})
+                  .find("This server may not publish on /stamped"),
+              std::string::npos);
+    // A deny pattern wins over an allow pattern.
+    EXPECT_NE(
+        call_error("call_service", {{"service", "/add_two_ints"}, {"request", {{"a", 1}, {"b", 2}}}})
+            .find("may not call /add_two_ints"),
+        std::string::npos);
+    EXPECT_NE(call_error("send_action_goal", {{"action", "/fibonacci"}, {"goal", {{"order", 2}}}})
+                  .find("may not send goals to /fibonacci"),
+              std::string::npos);
+    EXPECT_NE(call_error("set_parameters", {{"node", "/test_robot"}, {"parameters", {{"speed", 3.0}}}})
+                  .find("may not set parameters of /test_robot"),
+              std::string::npos);
+    EXPECT_DOUBLE_EQ(g_robot->node().get_parameter("speed").as_double(), 1.0);
+    // Reading is not limited.
+    EXPECT_EQ(
+        call("get_parameters", {{"node", "/test_robot"}, {"names", {"speed"}}})["parameters"]["speed"],
+        1.0);
+}
+
+TEST_F(ServerTest, FollowsAndCancelsLongGoals) {
+    connect();
+    const json sent = call("send_action_goal",
+                           {{"action", "/fibonacci"}, {"goal", {{"order", 10}}}, {"wait", false}});
+    ASSERT_EQ(sent["accepted"], true);
+    const std::string id = sent["goal_id"];
+    EXPECT_EQ(id.size(), 36U);
+    const json done = call("action_goal_status", {{"goal_id", id}, {"wait", 10}});
+    EXPECT_EQ(done["status"], "succeeded") << done.dump();
+    EXPECT_EQ(done["result"]["sequence"].size(), 11U);
+    EXPECT_GE(done["feedback_count"], 1);
+
+    const json long_goal = call(
+        "send_action_goal", {{"action", "/fibonacci"}, {"goal", {{"order", 1000}}}, {"wait", false}});
+    const std::string long_id = long_goal["goal_id"];
+    const std::string running = call("action_goal_status", {{"goal_id", long_id}})["status"];
+    EXPECT_TRUE(running == "accepted" || running == "executing") << running;
+    const json cancelled = call("cancel_action_goal", {{"goal_id", long_id}});
+    EXPECT_EQ(cancelled["status"], "canceled") << cancelled.dump();
+
+    const json listed = call("action_goal_status");
+    ASSERT_EQ(listed["goals"].size(), 2U);
+    EXPECT_EQ(listed["goals"][0]["goal_id"], id);
+    EXPECT_NE(call_error("action_goal_status", {{"goal_id", "nope"}}).find("There is no goal nope"),
+              std::string::npos);
+}
+
+TEST(HttpsServerTest, ServesHttpsToClientsWithTheToken) {
+    const std::uint16_t port = free_port();
+    const auto dir = std::filesystem::temp_directory_path() / ("mcp_ros2_tls_" + std::to_string(port));
+    std::filesystem::create_directories(dir);
+    const std::string cert = (dir / "cert.pem").string();
+    const std::string key = (dir / "key.pem").string();
+    const std::string make_cert =
+        "openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj "
+        "/CN=localhost "
+        "-addext subjectAltName=IP:127.0.0.1,DNS:localhost -keyout \"" +
+        key + "\" -out \"" + cert + "\"";
+    ASSERT_EQ(std::system(make_cert.c_str()), 0) << make_cert;
+
+    const Child server({MCP_ROS2_BINARY, "--transport=http", "--port=" + std::to_string(port),
+                        "--token=s3cret", "--tls-cert=" + cert, "--tls-key=" + key});
+    const auto client_with = [&](const std::string& token) {
+        mcp::HttpEndpointOptions http;
+        http.configure = [cert, token](mcp::HttpClientTransport& transport) {
+            mcp::TlsClientOptions tls;
+            tls.use_system_roots = false;
+            tls.ca_files = {cert};
+            transport.set_tls(tls);
+            transport.set_bearer_token_provider([token] { return token; });
+        };
+        return std::make_unique<mcp::Client>(
+            mcp::Endpoint::http("https://127.0.0.1:" + std::to_string(port) + "/mcp", std::move(http)));
+    };
+
+    std::unique_ptr<mcp::Client> client;
+    ASSERT_TRUE(wait_for([&] {
+        try {
+            auto attempt = client_with("s3cret");
+            attempt->sync().connect("mcp-ros2-test", "1.0.0");
+            client = std::move(attempt);
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    })) << "the HTTPS server did not come up";
+    const mcp::CallToolResult result = client->sync().call_tool("list_nodes", json::object());
+    EXPECT_FALSE(result.isError.value_or(false)) << mcp::result_text(result);
+    client.reset();
+
+    EXPECT_ANY_THROW(client_with("wrong")->sync().connect("mcp-ros2-test", "1.0.0"));
+    std::filesystem::remove_all(dir);
 }
 
 }  // namespace

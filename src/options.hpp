@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -24,11 +25,27 @@ struct Options {
 
     /// The name of the server's own ROS node.
     std::string node_name = "mcp_ros2";
-    /// Leave out the tools that change the system: publish, call_service, send_action_goal and
-    /// set_parameters.
+    /// Leave out the tools that change the system: publish, call_service, send_action_goal,
+    /// cancel_action_goal and set_parameters, and action_goal_status, which follows sent goals.
     bool read_only = false;
     /// Arrays longer than this are shortened in the messages the server returns.
     std::size_t max_array = 64;
+    /// Names the tools that act may touch, and names they may not, as AccessRules takes them.
+    std::vector<std::string> allow;
+    std::vector<std::string> deny;
+
+    /// Seconds after start that graph queries wait for discovery to fill in the graph.
+    double discovery_wait = 1.5;
+    /// Seconds a read of a topic resource waits for a message.
+    double resource_wait = 3;
+    /// Least seconds between two notices that a subscribed topic has a new message.
+    double notify_interval = 1;
+
+    /// The HTTP server's certificate chain and private key, as PEM files; empty for plain HTTP.
+    std::filesystem::path tls_certificate;
+    std::filesystem::path tls_key;
+    /// Authorities that client certificates must chain to; clients need one when any is given.
+    std::vector<std::filesystem::path> tls_client_cas;
 };
 
 /// What parse_options() decided.

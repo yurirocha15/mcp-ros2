@@ -25,10 +25,13 @@ class RosTools {
     RosTools(const RosTools&) = delete;
     RosTools& operator=(const RosTools&) = delete;
 
+    /// What the tools share.
+    struct Shared;
     /// The topics clients subscribed to, with what is needed to tell them of new messages.
     struct Watches;
 
    private:
+    std::shared_ptr<Shared> shared_;
     std::shared_ptr<Watches> watches_;
 };
 

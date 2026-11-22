@@ -53,14 +53,21 @@ These are calls an MCP client made to the server, with turtlesim running next to
 | `publish` | Publishes a message, once or several times at a rate. |
 | `call_service` | Calls a service and returns its response. |
 | `send_action_goal` | Sends a goal and waits for the result, reporting feedback as MCP progress. |
+| `action_goal_status` | Follows a goal sent with `wait: false`: status, feedback, and the result. |
+| `cancel_action_goal` | Cancels a goal sent with `wait: false`. |
 | `set_parameters` | Sets a node's parameters. |
 
-The last four change the running system and can move a robot. Their tool annotations mark them as
-destructive, and `--read-only` leaves them out.
+`publish`, `call_service`, `send_action_goal`, `cancel_action_goal` and `set_parameters` change the
+running system and can move a robot. Their tool annotations mark them as destructive; `--read-only`
+leaves them out, and `--allow` and `--deny` limit the names they may touch (see
+[Safety](#safety)).
 
 Long-running calls report progress, and a client can cancel them: a cancelled `echo` returns what
 it received so far, and an action goal still running when its call is cancelled or times out is
-cancelled on the action server.
+cancelled on the action server. A goal that takes longer than a call should, such as a navigation
+mission, can be sent with `wait: false`: the call returns a `goal_id` once the goal is accepted, the
+goal runs on, and `action_goal_status` (which can wait for it) and `cancel_action_goal` take it from
+there.
 
 ## Resources
 
@@ -90,7 +97,8 @@ messages do not arrive.
 ## Requirements
 
 ROS 2 Jazzy or Lyrical. The server uses the generic service and action clients rclcpp has had since
-Jazzy, so Humble is not supported.
+Jazzy, so Humble is not supported. CI builds it and runs its tests on Jazzy and Lyrical, on amd64 and
+arm64, with Fast DDS, Cyclone DDS and Zenoh.
 
 ## Building
 
@@ -139,19 +147,38 @@ interface types of the packages in that environment, so source the workspace tha
 message packages too.
 
 With `--transport=http` the server listens for MCP over HTTP instead, on 127.0.0.1:9797 by default.
-Listening on another address needs a bearer token (`--token` or `MCP_ROS2_TOKEN`).
+Listening on another address needs a way to authenticate callers: a bearer token (`--token` or
+`MCP_ROS2_TOKEN`), client certificates (`--tls-client-ca`), or both. `--tls-cert` and `--tls-key`
+serve HTTPS, so the token does not cross the network in clear text:
+
+```sh
+ros2 run mcp_ros2 mcp_ros2 --transport=http --host=0.0.0.0 \
+  --tls-cert=server.pem --tls-key=server-key.pem --token="$(cat token.txt)"
+```
 
 ## Options
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--read-only` | off | Leave out `publish`, `call_service`, `send_action_goal` and `set_parameters`. |
+| `--read-only` | off | Leave out the tools that change the system, and `action_goal_status`. |
+| `--allow=<pattern>` | any name | Let the tools that act touch only matching names; repeatable. |
+| `--deny=<pattern>` | none | Never let them touch matching names; repeatable. |
 | `--node-name=<name>` | `mcp_ros2` | The server's node name. |
 | `--max-array=<n>` | 64 | Shorten longer arrays in returned messages. |
+| `--discovery-wait=<s>` | 1.5 | Seconds after start that graph queries wait for discovery. |
+| `--resource-wait=<s>` | 3 | Seconds a topic resource read waits for a message. |
+| `--notify-interval=<s>` | 1 | Least seconds between notices of new messages on a subscribed topic. |
 | `--transport=<stdio\|http>` | `stdio` | How clients connect. |
 | `--host=<address>` | `127.0.0.1` | HTTP listen address. |
 | `--port=<n>` | 9797 | HTTP listen port. |
 | `--token=<token>` | `$MCP_ROS2_TOKEN` | Bearer token HTTP clients must send. |
+| `--tls-cert=<file>` | none | Serve HTTPS with this PEM certificate chain. |
+| `--tls-key=<file>` | none | The PEM private key of `--tls-cert`. |
+| `--tls-client-ca=<file>` | none | Require client certificates from this PEM authority; repeatable. |
+
+Discovery fills in the graph a moment after the server starts, so the first graph queries wait
+`--discovery-wait` seconds from start; raise it for large graphs, slow networks or a remote Zenoh
+router.
 
 Arguments after `--ros-args` go to ROS, such as `--ros-args -r __ns:=/robot1` or
 `--ros-args -p use_sim_time:=true`; with simulation time, `"now"` stamps follow `/clock`.
@@ -161,6 +188,20 @@ Arguments after `--ros-args` go to ROS, such as `--ros-args -r __ns:=/robot1` or
 An agent with this server can do what any node on the network can do: drive a robot, call any
 service, and change parameters. Start with `--read-only` on real hardware, check the commands the
 agent proposes, and keep the robot's own safety layers (velocity limits, emergency stops) in place.
+
+`--allow` and `--deny` limit what the tools that act may touch: the topics `publish` publishes on,
+the services `call_service` calls, the actions `send_action_goal` and `cancel_action_goal` use, and
+the nodes `set_parameters` changes. Patterns are fully qualified ROS names, in which `*` matches
+within one part of a name and `**` across parts. A name may be used when it matches an `--allow`
+pattern, or none is given, and no `--deny` pattern. Reading is not limited. For example, to let an
+agent drive one robot's base and nothing else:
+
+```sh
+ros2 run mcp_ros2 mcp_ros2 --allow=/robot1/cmd_vel --allow=/robot1/navigate_to_pose
+```
+
+The server's instructions tell the agent the rules, and a call outside them fails with a message
+that names them.
 
 ## How it works
 

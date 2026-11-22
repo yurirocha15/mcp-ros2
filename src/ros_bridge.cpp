@@ -3,12 +3,14 @@
 #include <rcl/graph.h>
 #include <rcl_action/graph.h>
 #include <rmw/qos_string_conversions.h>
+#include <action_msgs/msg/goal_status.hpp>
 #include <tf2_ros/buffer.hpp>
 #include <tf2_ros/transform_listener.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <numbers>
 #include <random>
 #include <set>
 
@@ -95,10 +97,18 @@ json qos_json(const rclcpp::QoS& qos) {
     return out;
 }
 
+/// Whether the middleware knows the node of @p endpoint yet. Node names arrive a moment after the
+/// node's endpoints are discovered; until then they read as placeholders.
+bool node_known(const rclcpp::TopicEndpointInfo& endpoint) {
+    return endpoint.node_name().find("_NODE_NAME_UNKNOWN_") == std::string::npos;
+}
+
 json endpoints_json(const std::vector<rclcpp::TopicEndpointInfo>& endpoints) {
     json out = json::array();
     for (const auto& endpoint : endpoints) {
-        out.push_back(json{{"node", join_name(endpoint.node_namespace(), endpoint.node_name())},
+        out.push_back(json{{"node", node_known(endpoint) ? json(join_name(endpoint.node_namespace(),
+                                                                          endpoint.node_name()))
+                                                         : json(nullptr)},
                            {"type", endpoint.topic_type()},
                            {"qos", qos_json(endpoint.qos_profile())}});
     }
@@ -163,7 +173,9 @@ std::string result_status(rclcpp_action::GenericClientGoalHandle::ResultCode cod
     }
 }
 
-double degrees(double radians) { return std::round(radians * 180.0 / M_PI * 1000.0) / 1000.0; }
+double degrees(double radians) {
+    return std::round(radians * 180.0 / std::numbers::pi * 1000.0) / 1000.0;
+}
 
 }  // namespace
 
@@ -259,6 +271,31 @@ json ActionGoal::result() const {
     return state_->result;
 }
 
+std::string ActionGoal::current_status() const {
+    rclcpp_action::GenericClientGoalHandle::SharedPtr handle;
+    {
+        const std::lock_guard lock(state_->mutex);
+        if (state_->finished) {
+            return state_->status;
+        }
+        if (!state_->answered) {
+            return "sent";
+        }
+        handle = state_->handle;
+    }
+    if (!handle) {
+        return "rejected";
+    }
+    switch (handle->get_status()) {
+        case action_msgs::msg::GoalStatus::STATUS_EXECUTING:
+            return "executing";
+        case action_msgs::msg::GoalStatus::STATUS_CANCELING:
+            return "canceling";
+        default:
+            return "accepted";
+    }
+}
+
 void ActionGoal::cancel() {
     rclcpp_action::GenericClientGoalHandle::SharedPtr handle;
     {
@@ -346,7 +383,8 @@ json Ros::node_info(const std::string& node) const {
     const json running = nodes();
     if (std::find(running.begin(), running.end(), full) == running.end()) {
         throw RosError("There is no node " + full +
-                       " in the graph; list_nodes shows the running nodes");
+                       " in the graph; list_nodes shows the running nodes. A node that just "
+                       "started can take a moment to appear.");
     }
     const auto [space, name] = split_node_name(full);
     const auto graph = node_->get_node_graph_interface();
@@ -387,10 +425,19 @@ json Ros::topic_info(const std::string& topic) const {
         throw RosError("No node publishes or subscribes to " + name +
                        "; list_topics shows the topics in use");
     }
-    return json{{"topic", name},
-                {"types", found->second},
-                {"publishers", endpoints_json(node_->get_publishers_info_by_topic(name))},
-                {"subscribers", endpoints_json(node_->get_subscriptions_info_by_topic(name))}};
+    const auto publishers = node_->get_publishers_info_by_topic(name);
+    const auto subscribers = node_->get_subscriptions_info_by_topic(name);
+    json out{{"topic", name},
+             {"types", found->second},
+             {"publishers", endpoints_json(publishers)},
+             {"subscribers", endpoints_json(subscribers)}};
+    if (!std::all_of(publishers.begin(), publishers.end(), node_known) ||
+        !std::all_of(subscribers.begin(), subscribers.end(), node_known)) {
+        out["note"] =
+            "Some nodes are null because their names have not been discovered yet; ask again in a "
+            "moment.";
+    }
+    return out;
 }
 
 json Ros::describe_interface(const std::string& type) {
@@ -656,6 +703,14 @@ std::shared_ptr<ActionGoal> Ros::send_goal(rclcpp_action::GenericClient::SharedP
     auto out = std::make_shared<ActionGoal>();
     out->client_ = client;
     out->type_ = type;
+    for (std::size_t i = 0; i < uuid.size(); ++i) {
+        static constexpr const char* g_HEX = "0123456789abcdef";
+        if (i == 4 || i == 6 || i == 8 || i == 10) {
+            out->id_ += '-';
+        }
+        out->id_ += g_HEX[uuid[i] >> 4];
+        out->id_ += g_HEX[uuid[i] & 0x0F];
+    }
     rclcpp_action::GenericClient::SendGoalOptions options;
     const JsonLimits limits = limits_;
     options.goal_response_callback =
