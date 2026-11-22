@@ -93,6 +93,10 @@ target_link_libraries(
     rosidl_typesupport_introspection_cpp::rosidl_typesupport_introspection_cpp
     tf2::tf2
     tf2_ros::tf2_ros)
+if(WIN32)
+  # windows.h must not define min and max as macros.
+  target_compile_definitions(mcp_ros2_core PUBLIC NOMINMAX)
+endif()
 if(MSVC)
   set(_mcp_ros2_warnings /W4)
 else()

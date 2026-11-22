@@ -95,6 +95,67 @@ jobs:
           ros2 run mcp_ros2 mcp_ros2 --version
           ros2 run mcp_ros2 mcp_ros2 --help
 
+  windows:
+    name: ROS 2 ${{ matrix.distro }} Windows
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [jazzy, lyrical]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: src/mcp_ros2
+
+      - uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: ${{ matrix.distro }}
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.conan2/p
+          key: windows-conan-${{ hashFiles('src/mcp_ros2/.github/workflows/ci.yml') }}
+          restore-keys: windows-conan-
+
+      # The ROS archive has neither Boost nor nlohmann/json, and its OpenSSL is 1.1, so the SDK's
+      # dependencies come from Conan; OpenSSL 3 is linked statically, next to ROS's own copy.
+      - name: Install the SDK's dependencies
+        shell: pwsh
+        run: |
+          python -m pip install conan ninja
+          conan profile detect --force
+          @"
+          [requires]
+          boost/1.90.0
+          nlohmann_json/3.12.0
+          openssl/3.6.5
+          [options]
+          boost/*:header_only=True
+          openssl/*:shared=False
+          [generators]
+          CMakeDeps
+          "@ | Set-Content -Path deps.txt
+          conan install deps.txt --output-folder=deps --build=missing -s build_type=Release -s compiler.cppstd=20
+
+      - name: Build
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          call C:\dev\${{ matrix.distro }}\ros2-windows\local_setup.bat
+          colcon build --merge-install --event-handlers console_cohesion+ --cmake-args -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_FIND_PACKAGE_PREFER_CONFIG=ON "-DCMAKE_PREFIX_PATH=%CD%\deps"
+
+      - name: Test
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          call C:\dev\${{ matrix.distro }}\ros2-windows\local_setup.bat
+          set "PATH=C:\Program Files\OpenSSL-Win64\bin;%PATH%"
+          colcon test --merge-install --event-handlers console_cohesion+ --return-code-on-test-failure || exit /b 1
+          colcon test-result --verbose
+
   format:
     name: Format
     runs-on: ubuntu-24.04
