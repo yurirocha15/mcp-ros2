@@ -1,0 +1,30 @@
+---
+BasedOnStyle: Google
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ConstructorInitializerIndentWidth: 4
+NamespaceIndentation: None
+# Force pointers to the type for C++.
+DerivePointerAlignment: false
+PointerAlignment: Left
+ColumnLimit: 104
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortFunctionsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+InsertBraces: true
+SpacesBeforeTrailingComments: 2
+SpaceAfterControlStatementKeyword: true
+SpaceAfterCStyleCast: false
+SpaceBeforeAssignmentOperators: true
+SpaceInEmptyParentheses: false
+MaxEmptyLinesToKeep: 1
+AlignEscapedNewlinesLeft: false
+AlignTrailingComments: true
+AlignAfterOpenBracket: Align
+# Configure each individual brace in BraceWrapping
+BreakBeforeBraces: Attach
+# Sort includes only on their blocks (separated by blank lines)
+IncludeBlocks: Preserve

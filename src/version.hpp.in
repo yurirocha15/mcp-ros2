@@ -1,0 +1,8 @@
+#pragma once
+
+namespace mcp_ros2 {
+
+/// The package version, from package.xml.
+inline constexpr const char* g_VERSION = "@mcp_ros2_VERSION@";
+
+}  // namespace mcp_ros2
