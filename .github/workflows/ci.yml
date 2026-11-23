@@ -156,20 +156,23 @@ jobs:
           run-install: false
           cache: false
 
-      # The SDK also needs Boost, with the CMake package files CMake 4 looks for, and nlohmann/json,
-      # which the ROS release's environment may lack. With RoboStack, the ROS packages this package
+      # The SDK also needs Boost and nlohmann/json. The ROS release's environment already pins Boost
+      # (as boost-cpp, for assimp), so that one is used; it may lack nlohmann/json. With RoboStack,
+      # Boost comes with the CMake package files CMake 4 looks for, and the ROS packages this package
       # and its tests use come from the same environment.
       - name: Install the dependencies
         shell: pwsh
         working-directory: C:\pixi_ws
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          $packages = @('libboost-devel>=1.90,<1.91')
+          $packages = @()
           if (-not (Select-String -Path pixi.toml -Pattern '^nlohmann_json\s*=' -Quiet)) {
             $packages += 'nlohmann_json'
           }
-          if ('${{ matrix.source }}' -eq 'robostack') {
-            $packages += 'ros-dev-tools', 'cmake', 'openssl'
+          if ('${{ matrix.source }}' -eq 'release') {
+            $packages += 'boost-cpp'
+          } else {
+            $packages += 'libboost-devel>=1.90,<1.91', 'ros-dev-tools', 'cmake', 'openssl'
             $packages += @('ros-base', 'tf2-ros', 'test-msgs', 'example-interfaces', 'ament-cmake-gtest') |
               ForEach-Object { "ros-${{ matrix.distro }}-$_" }
           }
