@@ -96,9 +96,11 @@ messages do not arrive.
 
 ## Requirements
 
-ROS 2 Jazzy or Lyrical. The server uses the generic service and action clients rclcpp has had since
-Jazzy, so Humble is not supported. CI builds it and runs its tests on Jazzy and Lyrical, on amd64 and
-arm64, with Fast DDS, Cyclone DDS and Zenoh.
+ROS 2 Jazzy or Lyrical. The server uses rclcpp's generic service and action clients; the action one
+reached Jazzy in rclcpp 28.1.18, so Jazzy needs that release or a later one, and Humble is not
+supported. CI builds it and runs its tests on Jazzy and Lyrical: on Linux, on amd64 and arm64, with
+Fast DDS, Cyclone DDS and Zenoh; on Windows, with Fast DDS, Lyrical from its binary release and
+Jazzy from RoboStack.
 
 ## Building
 
@@ -115,6 +117,38 @@ colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 
 The MCP C++ SDK is not in the ROS package index yet; until it is, the build downloads it from
 GitHub when it is not installed.
+
+### Windows
+
+Install ROS 2 Lyrical as its
+[Windows binary install](https://docs.ros.org/en/lyrical/Get-Started/Installation/Windows-Install-Binary.html)
+describes, then, in the "x64 Native Tools Command Prompt for VS 2022", add Boost to its pixi
+environment and build:
+
+```bat
+cd C:\pixi_ws
+pixi add boost-cpp
+pixi shell
+call C:\pixi_ws\ros2-windows\local_setup.bat
+mkdir C:\mcp_ws\src
+cd C:\mcp_ws\src
+git clone https://github.com/yurirocha15/mcp-ros2.git
+cd C:\mcp_ws
+colcon build --merge-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+call install\local_setup.bat
+ros2 run mcp_ros2 mcp_ros2 --version
+```
+
+Jazzy's newest Windows binary release is older than rclcpp 28.1.18, so for Jazzy use a
+[RoboStack](https://robostack.github.io/GettingStarted.html) environment instead, with
+`https://prefix.dev/robostack-jazzy` and `conda-forge` as its channels. Add ROS, the build
+dependencies and the test dependencies to it in place of `pixi add boost-cpp`, and leave out the
+`ros2-windows` setup script:
+
+```bat
+pixi add ros-jazzy-ros-base ros-jazzy-tf2-ros ros-dev-tools cmake openssl nlohmann_json ^
+  "libboost-devel>=1.90,<1.91" ros-jazzy-ament-cmake-gtest ros-jazzy-test-msgs ros-jazzy-example-interfaces
+```
 
 ## Using it from an agent
 
