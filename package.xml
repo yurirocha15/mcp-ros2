@@ -8,7 +8,7 @@
     as a node of its own. Topics, services, actions, parameters and transforms of any installed
     interface type, as JSON.
   </description>
-  <maintainer email="yurirocha15@gmail.com">Yuri Rocha</maintainer>
+  <maintainer email="yuri@yurirocha.com">Yuri Rocha</maintainer>
   <license>Apache-2.0</license>
   <url type="repository">https://github.com/yurirocha15/mcp-ros2</url>
   <url type="bugtracker">https://github.com/yurirocha15/mcp-ros2/issues</url>
