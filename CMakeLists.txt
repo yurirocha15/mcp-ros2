@@ -21,6 +21,13 @@ find_package(rcl_action REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
+# The generic action client reached Jazzy in rclcpp_action 28.1.18.
+if(rclcpp_action_VERSION VERSION_LESS 28.1.18)
+  message(
+    FATAL_ERROR
+      "mcp_ros2 needs rclcpp_action 28.1.18 or later, for its generic action "
+      "client; found ${rclcpp_action_VERSION}. Update ROS 2.")
+endif()
 find_package(rcpputils REQUIRED)
 find_package(rmw REQUIRED)
 find_package(rosidl_runtime_c REQUIRED)
