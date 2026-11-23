@@ -101,7 +101,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: [jazzy, lyrical]
+        include:
+          # Lyrical comes from its official Windows release. Jazzy's newest Windows release predates
+          # the generic action client, so Jazzy comes from RoboStack's conda packages instead.
+          - distro: jazzy
+            source: robostack
+            ros_setup: ""
+          - distro: lyrical
+            source: release
+            ros_setup: C:\pixi_ws\ros2-windows\local_setup.bat
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,6 +119,7 @@ jobs:
       # environment ros2/ros2 publishes for the distribution, ROS 2 from the newest release that
       # has a Windows archive (not every release does).
       - name: Get ROS 2
+        if: matrix.source == 'release'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -126,6 +135,20 @@ jobs:
           7z x ros2.zip -oC:\pixi_ws -y | Out-Null
           Remove-Item ros2.zip
 
+      - name: Start a RoboStack workspace
+        if: matrix.source == 'robostack'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\pixi_ws | Out-Null
+          @"
+          [workspace]
+          name = "ros"
+          channels = ["https://prefix.dev/robostack-${{ matrix.distro }}", "conda-forge"]
+          platforms = ["win-64"]
+
+          [dependencies]
+          "@ | Set-Content -Path C:\pixi_ws\pixi.toml
+
       - uses: prefix-dev/setup-pixi@v0.11.3
         with:
           pixi-version: v0.84.2
@@ -133,7 +156,9 @@ jobs:
           run-install: false
           cache: false
 
-      # The SDK also needs Boost's headers and nlohmann/json, which the ROS environment may lack.
+      # The SDK also needs Boost's headers and nlohmann/json, which the ROS release's environment
+      # may lack. With RoboStack, the ROS packages this package and its tests use come from the
+      # same environment.
       - name: Install the dependencies
         shell: pwsh
         working-directory: C:\pixi_ws
@@ -143,25 +168,34 @@ jobs:
           if (-not (Select-String -Path pixi.toml -Pattern '^nlohmann_json\s*=' -Quiet)) {
             $packages += 'nlohmann_json'
           }
+          if ('${{ matrix.source }}' -eq 'robostack') {
+            $packages += 'ros-dev-tools', 'cmake', 'openssl'
+            $packages += @('ros-base', 'tf2-ros', 'test-msgs', 'example-interfaces', 'ament-cmake-gtest') |
+              ForEach-Object { "ros-${{ matrix.distro }}-$_" }
+          }
           pixi add @packages
           pixi shell-hook --shell cmd | Set-Content -Encoding ascii activate.bat
 
       - name: Build
         shell: cmd
+        env:
+          ROS_SETUP: ${{ matrix.ros_setup }}
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
           call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           call C:\pixi_ws\activate.bat || exit /b 1
-          call C:\pixi_ws\ros2-windows\local_setup.bat
+          if not "%ROS_SETUP%"=="" call "%ROS_SETUP%"
           colcon build --merge-install --event-handlers console_cohesion+ --cmake-args -DCMAKE_BUILD_TYPE=Release
 
       - name: Test
         shell: cmd
+        env:
+          ROS_SETUP: ${{ matrix.ros_setup }}
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS=%%i"
           call "%VS%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           call C:\pixi_ws\activate.bat || exit /b 1
-          call C:\pixi_ws\ros2-windows\local_setup.bat
+          if not "%ROS_SETUP%"=="" call "%ROS_SETUP%"
           colcon test --merge-install --event-handlers console_cohesion+ --return-code-on-test-failure || exit /b 1
           colcon test-result --verbose
 
