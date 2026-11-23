@@ -404,31 +404,32 @@ void field_from_json(const MessageMember& member, const json& value, void* field
         }
         member.resize_function(field, size);
     }
+    // Elements report errors with an empty path, and the element's path is prefixed only when one
+    // is thrown, so that no string is built per element.
     for (std::size_t i = 0; i < size; ++i) {
-        const std::string at = path + "[" + std::to_string(i) + "]";
-        if (member.type_id_ == ts::ROS_TYPE_MESSAGE) {
-            try {
+        try {
+            if (member.type_id_ == ts::ROS_TYPE_MESSAGE) {
                 from_json(value[i], nested(member), member.get_function(field, i), now);
-            } catch (const MessageError& error) {
-                // The nested error path starts at the nested message; prefix it with this element.
-                const std::string what = error.what();
-                constexpr std::string_view whole = "the message";
-                throw MessageError(what.starts_with(whole) ? at + what.substr(whole.size())
-                                                           : at + "." + what);
+            } else if (member.type_id_ == ts::ROS_TYPE_STRING) {
+                check_string_bound(member, value[i], {});
+                std::string text;
+                set_primitive(member.type_id_, value[i], &text, {});
+                member.assign_function(field, i, &text);
+            } else if (member.type_id_ == ts::ROS_TYPE_WSTRING) {
+                std::u16string text;
+                set_primitive(member.type_id_, value[i], &text, {});
+                member.assign_function(field, i, &text);
+            } else {
+                PrimitiveSlot slot{};
+                set_primitive(member.type_id_, value[i], &slot, {});
+                member.assign_function(field, i, &slot);
             }
-        } else if (member.type_id_ == ts::ROS_TYPE_STRING) {
-            check_string_bound(member, value[i], at);
-            std::string text;
-            set_primitive(member.type_id_, value[i], &text, at);
-            member.assign_function(field, i, &text);
-        } else if (member.type_id_ == ts::ROS_TYPE_WSTRING) {
-            std::u16string text;
-            set_primitive(member.type_id_, value[i], &text, at);
-            member.assign_function(field, i, &text);
-        } else {
-            PrimitiveSlot slot{};
-            set_primitive(member.type_id_, value[i], &slot, at);
-            member.assign_function(field, i, &slot);
+        } catch (const MessageError& error) {
+            const std::string at = path + "[" + std::to_string(i) + "]";
+            const std::string what = error.what();
+            constexpr std::string_view whole = "the message";
+            throw MessageError(what.starts_with(whole) ? at + what.substr(whole.size())
+                                                       : at + "." + what);
         }
     }
 }

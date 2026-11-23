@@ -168,6 +168,12 @@ TEST_F(MessageJsonTest, ErrorsNameTheField) {
     EXPECT_EQ(
         error("test_msgs/msg/UnboundedSequences", {{"basic_types_values", {{{"int8_value", "x"}}}}}),
         "basic_types_values[0].int8_value: expected an integer, not \"x\"");
+    EXPECT_EQ(error("test_msgs/msg/UnboundedSequences", {{"int32_values", {1, 2, "x"}}}),
+              "int32_values[2]: expected an integer, not \"x\"");
+    EXPECT_EQ(error("test_msgs/msg/UnboundedSequences", {{"float64_values", {0.5, nullptr}}}),
+              "float64_values[1]: expected a number, not null");
+    EXPECT_EQ(error("test_msgs/msg/UnboundedSequences", {{"string_values", {"a", 5}}}),
+              "string_values[1]: expected a string, not 5");
     EXPECT_EQ(error("std_msgs/msg/String", json::array()),
               "the message: expected an object of fields for std_msgs/msg/String, not []");
 }
