@@ -156,10 +156,11 @@ jobs:
           run-install: false
           cache: false
 
-      # The SDK also needs Boost and nlohmann/json. The ROS release's environment already pins Boost
-      # (as boost-cpp, for assimp), so that one is used; it may lack nlohmann/json. With RoboStack,
-      # Boost comes with the CMake package files CMake 4 looks for, and the ROS packages this package
-      # and its tests use come from the same environment.
+      # The SDK also needs Boost and nlohmann/json. In the ROS release's environment, assimp depends
+      # on boost-cpp, which conda-forge's newer libboost-devel cannot be installed with, so Boost is
+      # boost-cpp there; that environment may also lack nlohmann/json. With RoboStack, Boost is
+      # libboost-devel, with the CMake package files CMake 4 looks for, and the ROS packages this
+      # package and its tests use come from the same environment.
       - name: Install the dependencies
         shell: pwsh
         working-directory: C:\pixi_ws
@@ -201,6 +202,17 @@ jobs:
           if not "%ROS_SETUP%"=="" call "%ROS_SETUP%"
           colcon test --merge-install --event-handlers console_cohesion+ --return-code-on-test-failure || exit /b 1
           colcon test-result --verbose
+
+      - name: Smoke test
+        shell: cmd
+        env:
+          ROS_SETUP: ${{ matrix.ros_setup }}
+        run: |
+          call C:\pixi_ws\activate.bat || exit /b 1
+          if not "%ROS_SETUP%"=="" call "%ROS_SETUP%"
+          call install\local_setup.bat
+          ros2 run mcp_ros2 mcp_ros2 --version || exit /b 1
+          ros2 run mcp_ros2 mcp_ros2 --help || exit /b 1
 
   format:
     name: Format
