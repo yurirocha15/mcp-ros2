@@ -156,15 +156,15 @@ jobs:
           run-install: false
           cache: false
 
-      # The SDK also needs Boost's headers and nlohmann/json, which the ROS release's environment
-      # may lack. With RoboStack, the ROS packages this package and its tests use come from the
-      # same environment.
+      # The SDK also needs Boost, with the CMake package files CMake 4 looks for, and nlohmann/json,
+      # which the ROS release's environment may lack. With RoboStack, the ROS packages this package
+      # and its tests use come from the same environment.
       - name: Install the dependencies
         shell: pwsh
         working-directory: C:\pixi_ws
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          $packages = @('libboost-headers>=1.90,<1.91')
+          $packages = @('libboost-devel>=1.90,<1.91')
           if (-not (Select-String -Path pixi.toml -Pattern '^nlohmann_json\s*=' -Quiet)) {
             $packages += 'nlohmann_json'
           }
