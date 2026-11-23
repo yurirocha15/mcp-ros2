@@ -1,5 +1,5 @@
-// Messages of real interface types as JSON and back: every field type, arrays of each kind, bounds,
-// nested messages, and the errors that name the field at fault.
+// Tests of message_json with installed interface types: all field types, array kinds, bounds,
+// nested messages, and error messages that name the failing field.
 
 #include "message_json.hpp"
 #include "type_support.hpp"
@@ -18,7 +18,7 @@ Stamp fixed_now() { return Stamp{1700000000, 250}; }
 
 class MessageJsonTest : public ::testing::Test {
    protected:
-    /// @p input written into a fresh message of @p type, read back as JSON.
+    /// Writes @p input into a new message of @p type and returns the message read back as JSON.
     json round_trip(const std::string& type, const json& input, const JsonLimits& limits = {}) {
         const auto found = types_.message(type);
         DynamicMessage message(*found->members);
@@ -26,7 +26,7 @@ class MessageJsonTest : public ::testing::Test {
         return to_json(*found->members, message.data(), limits);
     }
 
-    /// The error that writing @p input into a message of @p type gives.
+    /// The error message from writing @p input into a message of @p type.
     std::string error(const std::string& type, const json& input) {
         const auto found = types_.message(type);
         DynamicMessage message(*found->members);

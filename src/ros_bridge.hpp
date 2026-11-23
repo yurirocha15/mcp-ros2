@@ -1,8 +1,8 @@
 #pragma once
 
-// The server's own ROS node, and what it does on the ROS graph: looking at nodes, topics,
-// services and actions, and using them with messages of any installed type. Calls that wait for
-// another node start the work and return a handle to check; the caller does the waiting.
+// The server's ROS node: graph queries, topic subscriptions and publishers, service calls, action
+// goals, parameters and transforms, for any installed interface type. Operations that depend on
+// another node return a handle (ServiceCall, ActionGoal, ParameterCall) that the caller polls.
 
 #include "message_json.hpp"
 #include "type_support.hpp"
@@ -32,21 +32,21 @@ class TransformListener;
 
 namespace mcp_ros2 {
 
-/// Something that cannot be done on the ROS graph, such as a topic nobody publishes without a
-/// type to use, or a node that does not exist. The message says what to do instead.
+/// Thrown for a request the ROS graph cannot serve, such as an unknown node, or a topic with no
+/// publishers and no given type. The error message suggests what to do instead.
 class RosError : public std::runtime_error {
    public:
     using std::runtime_error::runtime_error;
 };
 
-/// QoS settings a caller may give for a subscription or publisher.
+/// Optional QoS overrides for a subscription or publisher.
 struct QosRequest {
     std::optional<std::string> reliability;  ///< "reliable" or "best_effort".
     std::optional<std::string> durability;   ///< "volatile" or "transient_local".
     std::optional<std::size_t> depth;
 };
 
-/// Messages of one topic as they arrive, kept serialized until they are read.
+/// A subscription that buffers a topic's messages in serialized form until they are read.
 class TopicTap {
    public:
     struct Sample {
@@ -57,7 +57,7 @@ class TopicTap {
 
     /// The number of samples received so far.
     [[nodiscard]] std::size_t count() const;
-    /// The samples received so far, oldest first; at most the capacity the tap was made with.
+    /// The buffered samples, oldest first; at most the tap's capacity.
     [[nodiscard]] std::vector<Sample> samples() const;
     /// The newest sample, if any.
     [[nodiscard]] std::optional<Sample> latest() const;
@@ -82,7 +82,7 @@ class TopicTap {
     rclcpp::GenericSubscription::SharedPtr subscription_;
 };
 
-/// A service request on its way.
+/// A pending service request.
 struct ServiceCall {
     rclcpp::GenericClient::SharedPtr client;
     std::shared_ptr<const ServiceType> type;
@@ -90,7 +90,7 @@ struct ServiceCall {
     std::int64_t request_id = 0;
 };
 
-/// An action goal sent, and what has come back for it so far.
+/// A sent action goal and the responses received for it.
 class ActionGoal {
    public:
     /// Whether the server has answered the goal request.
@@ -104,14 +104,13 @@ class ActionGoal {
     [[nodiscard]] nlohmann::json last_feedback() const;
     /// "succeeded", "aborted", "canceled" or "unknown", once finished.
     [[nodiscard]] std::string status() const;
-    /// The status now: before it finishes "sent", "accepted", "executing" or "canceling", and
-    /// then status().
+    /// "sent", "accepted", "executing" or "canceling" before the goal finishes; status() after.
     [[nodiscard]] std::string current_status() const;
     /// The goal's ID, as a UUID.
     [[nodiscard]] const std::string& id() const { return id_; }
     /// The result, once finished.
     [[nodiscard]] nlohmann::json result() const;
-    /// Asks the server to cancel the goal, once it is accepted.
+    /// Requests cancellation of the goal; has no effect before the goal is accepted.
     void cancel();
 
    private:
@@ -133,14 +132,14 @@ class ActionGoal {
     std::shared_future<rclcpp_action::GenericClientGoalHandle::SharedPtr> handle_;
 };
 
-/// A parameter request to another node on its way, with the client that waits for it.
+/// A pending parameter request, with the client that must outlive it.
 template <typename T>
 struct ParameterCall {
     std::shared_ptr<rclcpp::AsyncParametersClient> client;
     std::shared_future<T> future;
 };
 
-/// The node, spun on a thread of its own while this lives. rclcpp must be initialized first.
+/// Owns the server's node and spins it on a dedicated thread. Requires rclcpp to be initialized.
 class Ros {
    public:
     Ros(const std::string& node_name, JsonLimits limits);
@@ -149,20 +148,20 @@ class Ros {
     Ros& operator=(const Ros&) = delete;
 
     [[nodiscard]] const JsonLimits& limits() const { return limits_; }
-    /// When the node started, from which discovery fills in the graph.
+    /// Time the node was created, which is when graph discovery starts.
     [[nodiscard]] std::chrono::steady_clock::time_point started() const { return started_; }
     [[nodiscard]] std::string node_name() const;
-    /// The node's clock now, which is simulation time when the node uses it.
+    /// Current time of the node's clock; simulation time when use_sim_time is set.
     [[nodiscard]] Stamp now() const;
     TypeLibrary& types() { return types_; }
 
     // The graph. Names are fully qualified, such as /robot1/odom.
 
     nlohmann::json nodes() const;
-    /// With @p hidden, also the topics and services under names starting with an underscore, such
-    /// as those that make up actions.
+    /// @p hidden includes names with a segment starting with an underscore, such as the topics and
+    /// services that implement actions.
     nlohmann::json topics(bool hidden) const;
-    /// With @p all, also every node's parameter and type description services.
+    /// @p all includes the standard per-node parameter and type description services.
     nlohmann::json services(bool hidden, bool all) const;
     nlohmann::json actions() const;
     nlohmann::json node_info(const std::string& node) const;
@@ -172,27 +171,27 @@ class Ros {
 
     // Topics.
 
-    /// The message type of @p topic: @p given when set, else the one type its publishers and
-    /// subscribers use.
+    /// The message type of @p topic: @p given when set, otherwise the single type its publishers
+    /// and subscribers use.
     std::shared_ptr<const MessageType> topic_type(const std::string& topic,
                                                   const std::optional<std::string>& given);
-    /// Subscribes to @p topic. Keeps the newest @p capacity messages, or none, only counting
-    /// them and their sizes, when @p keep_messages is false.
+    /// Subscribes to @p topic and keeps the newest @p capacity messages. With @p keep_messages
+    /// false, it only counts messages and their sizes.
     std::shared_ptr<TopicTap> tap(const std::string& topic, std::shared_ptr<const MessageType> type,
                                   std::size_t capacity, bool keep_messages, const QosRequest& qos);
-    /// The message in @p sample as JSON, with arrays shortened to @p limits.
+    /// The message in @p sample as JSON, with arrays truncated to @p limits.
     nlohmann::json message_json(const TopicTap& tap, const TopicTap::Sample& sample,
                                 const JsonLimits& limits) const;
     /// A publisher for @p topic, reused for later calls with the same type and QoS.
     rclcpp::GenericPublisher::SharedPtr publisher(const std::string& topic,
                                                   const std::shared_ptr<const MessageType>& type,
                                                   const QosRequest& qos);
-    /// @p message, of type @p type, serialized for a publisher.
+    /// Serializes @p message, of type @p type, for a publisher.
     rclcpp::SerializedMessage serialize(const MessageType& type, const nlohmann::json& message);
 
     // Services and actions.
 
-    /// The type of @p service: @p given when set, else the one the graph knows.
+    /// The type of @p service: @p given when set, otherwise the type in the graph.
     std::shared_ptr<const ServiceType> service_type(const std::string& service,
                                                     const std::optional<std::string>& given);
     /// A client for @p service, reused for later calls.
@@ -203,7 +202,7 @@ class Ros {
                      const nlohmann::json& request);
     nlohmann::json response_json(const ServiceCall& call) const;
 
-    /// The type of @p action: @p given when set, else the one the graph knows.
+    /// The type of @p action: @p given when set, otherwise the type in the graph.
     std::shared_ptr<const ActionType> action_type(const std::string& action,
                                                   const std::optional<std::string>& given);
     /// A client for @p action, reused for later goals.
@@ -230,9 +229,9 @@ class Ros {
 
     /// Starts listening to /tf and /tf_static, once.
     void listen_to_transforms();
-    /// The transform from @p source to @p target frame, newest available, if there is one.
+    /// The latest available transform from @p source to @p target frame, if any.
     std::optional<nlohmann::json> transform(const std::string& target, const std::string& source);
-    /// The frames heard of so far.
+    /// Frames received on /tf and /tf_static so far.
     std::vector<std::string> frames();
 
    private:

@@ -1,6 +1,6 @@
 #pragma once
 
-// The MCP side: the tools, resources and instructions that put the ROS graph in front of an agent.
+// MCP tools, resources and server instructions backed by the ROS bridge (ros_bridge.hpp).
 
 #include "options.hpp"
 #include "ros_bridge.hpp"
@@ -13,11 +13,11 @@
 
 namespace mcp_ros2 {
 
-/// Runs a task on the handlers' event loop, from any thread.
+/// Schedules a coroutine on the handler event loop; callable from any thread.
 using Spawn = std::function<void(mcp::Task<void>)>;
 
-/// The tools and resources of one server. Must be destroyed before @p ros, and lives while the
-/// server runs.
+/// Registers the ROS tools and resources on an mcp::Server. Must stay alive while the server runs
+/// and be destroyed before @p ros.
 class RosTools {
    public:
     RosTools(mcp::Server& server, Ros& ros, const Options& options, Spawn spawn);
@@ -25,9 +25,9 @@ class RosTools {
     RosTools(const RosTools&) = delete;
     RosTools& operator=(const RosTools&) = delete;
 
-    /// What the tools share.
+    /// State shared by the tool handlers.
     struct Shared;
-    /// The topics clients subscribed to, with what is needed to tell them of new messages.
+    /// Subscribed topic resources and the listeners that send their update notifications.
     struct Watches;
 
    private:

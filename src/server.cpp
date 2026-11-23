@@ -74,9 +74,9 @@ struct Hints {
     bool destructive;
 };
 
-/// Looks at the graph.
+/// Annotations of the tools that only read.
 constexpr Hints g_READS{true, false};
-/// Changes the running system, which may move a robot.
+/// Annotations of the tools that change the system, which may move a robot.
 constexpr Hints g_ACTS{false, true};
 
 mcp::Tool tool(const char* name, const char* title, const char* description, json schema, Hints hints) {
@@ -96,7 +96,8 @@ mcp::Tool tool(const char* name, const char* title, const char* description, jso
     return out;
 }
 
-// Arguments. The server checks their JSON types against the schema before a handler runs.
+// Argument accessors. The SDK validates argument types against the input schema before a handler
+// runs.
 
 std::optional<std::string> string_arg(const json& args, const char* name) {
     if (const auto it = args.find(name); it != args.end() && it->is_string()) {
@@ -234,7 +235,7 @@ bool is_ready(const std::shared_future<T>& future) {
     return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
 
-/// Why a wait ended early, for an error message.
+/// The reason a wait ended early, for error messages.
 std::string stopped(const mcp::Context& ctx, double timeout) {
     return ctx.is_cancelled() ? "the call was cancelled"
                               : "nothing came within " + number_text(timeout) + " s";
@@ -254,7 +255,7 @@ json select_field(const json& message, const std::string& path) {
         if (part.empty()) {
             throw std::invalid_argument("field '" + path + "' has an empty part");
         }
-        // A shortened array keeps its first values under "head".
+        // A truncated array has its first values under "head".
         if (at->is_object() && at->contains("head") && at->contains("length") && at->size() == 2) {
             at = &(*at)["head"];
         }
@@ -291,8 +292,8 @@ json select_field(const json& message, const std::string& path) {
 
 }  // namespace
 
-/// What the tools share: the node, the rules for the tools that act, and the goals sent without
-/// waiting for their results.
+/// State shared by the tool handlers: the ROS bridge, the access rules, and the goals sent with
+/// wait=false.
 struct RosTools::Shared {
     struct Goal {
         std::string action;
@@ -304,8 +305,8 @@ struct RosTools::Shared {
     Shared(Ros& ros_ref, const Options& options)
         : ros(ros_ref), access(options.allow, options.deny), discovery_wait(options.discovery_wait) {}
 
-    /// Keeps @p goal to be followed by its ID. The oldest goal is forgotten past g_MAX_GOALS,
-    /// a finished one first; forgetting a goal does not stop it.
+    /// Stores @p goal for lookup by ID. At g_MAX_GOALS, the oldest finished goal is dropped, or the
+    /// oldest goal if none has finished; a dropped goal keeps running.
     void add_goal(Goal goal) {
         const std::lock_guard lock(mutex_);
         if (goals_.size() >= g_MAX_GOALS) {
@@ -344,8 +345,8 @@ namespace {
 
 using Tools = std::shared_ptr<RosTools::Shared>;
 
-/// Waits out the first moments of the node, in which discovery is still filling in the graph, so
-/// that the first listing an agent asks for is not empty.
+/// Waits until discovery_wait seconds after node start, so that graph queries made right after
+/// start include the entities discovery has found by then.
 mcp::Task<void> settle(mcp::Context& ctx, const RosTools::Shared& tools) {
     co_await wait_until(ctx, tools.ros.started() + seconds(tools.discovery_wait), [] { return false; });
 }
@@ -357,9 +358,9 @@ mcp::Task<json> query_graph(mcp::Context& ctx, Tools tools, GraphQuery query, js
     co_return query(args);
 }
 
-// The tools. Each runs as a coroutine on the handler thread; the ROS node's own thread delivers
-// what they wait for. Each holds the shared state, so a call still running when the server stops
-// keeps what it uses.
+// Tool handlers. Each runs as a coroutine on the handler thread and polls for results that the
+// node's thread delivers. Each holds a reference to the shared state, which keeps it alive for
+// calls still running at shutdown.
 
 mcp::Task<json> echo(mcp::Context& ctx, Tools tools, json args) {
     Ros& ros = tools->ros;
@@ -468,7 +469,7 @@ mcp::Task<json> publish(mcp::Context& ctx, Tools tools, json args) {
     const double rate = number_arg(args, "rate", 0.1, 1000).value_or(10);
     const double wait = number_arg(args, "wait_for_subscribers", 0, 30).value_or(1);
 
-    // Serializing checks the message before anything goes out.
+    // Serialize before publishing anything, to validate the message.
     const rclcpp::SerializedMessage first = ros.serialize(*type, message);
     const auto publisher = ros.publisher(topic, type, qos_arg(args));
     co_await wait_until(ctx, Clock::now() + seconds(wait),
@@ -477,7 +478,7 @@ mcp::Task<json> publish(mcp::Context& ctx, Tools tools, json args) {
     std::size_t published = 0;
     auto next = Clock::now();
     while (published < times && !ctx.is_cancelled()) {
-        // Each message gets its own "now".
+        // Serialize each message again so that "now" fields get the current time.
         publisher->publish(published == 0 ? first : ros.serialize(*type, message));
         ++published;
         if (times > 1) {
@@ -566,7 +567,7 @@ mcp::Task<json> send_action_goal(mcp::Context& ctx, Tools tools, json args) {
                             shortened(goal->last_feedback().dump())};
         });
     if (!finished) {
-        // A goal nobody waits for any more is cancelled rather than left running.
+        // Cancel the goal when the call times out or is cancelled, instead of leaving it running.
         out["note"] = std::string(ctx.is_cancelled() ? "The call was cancelled"
                                                      : "The goal did not finish within " +
                                                            number_text(timeout) + " s") +
@@ -584,7 +585,7 @@ mcp::Task<json> send_action_goal(mcp::Context& ctx, Tools tools, json args) {
     co_return out;
 }
 
-/// A parameter client for @p node whose services are up.
+/// A parameter client for @p node, once its parameter services are available.
 mcp::Task<std::shared_ptr<rclcpp::AsyncParametersClient>> ready_parameter_client(
     mcp::Context& ctx, Ros& ros, const std::string& node, Clock::time_point deadline, double timeout) {
     auto client = ros.parameter_client(node);
@@ -652,7 +653,7 @@ mcp::Task<json> set_parameters(mcp::Context& ctx, Tools tools, json args) {
     for (const auto& [name, value] : wanted.items()) {
         names.push_back(name);
     }
-    // Values take the types the parameters have, so 1 sets a double parameter to 1.0.
+    // Values are converted to each parameter's current type, so 1 sets a double parameter to 1.0.
     const auto current =
         co_await parameter_result(ctx, ros.get_parameters(client, names), node, deadline, timeout);
     std::map<std::string, rclcpp::ParameterType> types;
@@ -704,7 +705,8 @@ mcp::Task<json> list_frames(mcp::Context& ctx, Tools tools, json args) {
     Ros& ros = tools->ros;
     const double wait = number_arg(args, "wait", 0, 30).value_or(1);
     ros.listen_to_transforms();
-    // Frames arrive as their transforms are published; static ones at once.
+    // Collect frames for `wait` seconds: dynamic frames appear as their transforms are published,
+    // static ones (transient-local) on subscription.
     co_await wait_until(ctx, Clock::now() + seconds(wait), [] { return false; });
     co_return json{{"frames", ros.frames()}};
 }
@@ -781,7 +783,7 @@ mcp::Task<json> cancel_action_goal(mcp::Context& ctx, Tools tools, json args) {
 
 }  // namespace
 
-// Resources: the graph, and the newest message on each topic.
+// Resources: ros://graph, and the latest message of each topic as ros://topic{+topic}.
 
 struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
     Watches(mcp::Server& server_ref, Ros& ros_ref, Spawn spawn_fn, const Options& options)
@@ -804,8 +806,8 @@ struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
         return qualified_name(uri.substr(g_TOPIC_URI.size()));
     }
 
-    /// The watched tap of @p uri, made when it is watched but has none yet, as when its topic was
-    /// unknown at first.
+    /// The tap of the watched @p uri, created if the watch has none, for example because the topic
+    /// was unknown when the client subscribed.
     std::shared_ptr<TopicTap> tap(const std::string& uri) {
         const std::lock_guard lock(mutex);
         const auto found = by_uri.find(uri);
@@ -838,7 +840,7 @@ struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
         }
     }
 
-    /// Stops watching, and waits for the notices on their way, which use the server.
+    /// Stops watching and waits for in-flight notifications, which reference the server.
     void close() {
         {
             const std::lock_guard lock(notice_mutex);
@@ -875,7 +877,7 @@ struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
         try {
             co_await watches->server.notify_resource_updated(uri);
         } catch (const std::exception&) {
-            // The client has gone.
+            // The session is closed; the notification is dropped.
         }
         watches->notice_done();
     }
@@ -884,7 +886,7 @@ struct RosTools::Watches : std::enable_shared_from_this<RosTools::Watches> {
         try {
             const std::string topic = *topic_of(uri);
             auto tap = ros.tap(topic, ros.topic_type(topic, std::nullopt), 1, true, {});
-            // Tell subscribers about new messages, at most once per interval.
+            // Notify subscribers of new messages, at most once per notify_interval.
             auto last = std::make_shared<std::pair<std::mutex, Clock::time_point>>();
             tap->on_message([self = weak_from_this(), uri, last] {
                 const auto watches = self.lock();

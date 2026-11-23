@@ -1,6 +1,6 @@
 #pragma once
 
-// Messages of any type as JSON, and JSON as messages, through the types' introspection layouts.
+// Conversion between messages of any type and JSON, using their introspection layouts.
 
 #include "type_support.hpp"
 
@@ -13,7 +13,7 @@
 
 namespace mcp_ros2 {
 
-/// JSON that does not fit a message type. The message names the field.
+/// Thrown when JSON does not fit a message type; the error message names the field.
 class MessageError : public std::invalid_argument {
    public:
     using std::invalid_argument::invalid_argument;

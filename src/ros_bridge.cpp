@@ -20,13 +20,13 @@ using nlohmann::json;
 
 namespace {
 
-/// Whether a part of @p name starts with an underscore, which hides it from listings, as the
-/// topics and services that make up an action do.
+/// Whether a segment of @p name starts with an underscore. Such names are hidden by convention;
+/// the topics and services that implement actions use them.
 bool is_hidden(const std::string& name) {
     return name.starts_with("_") || name.find("/_") != std::string::npos;
 }
 
-/// Whether @p types are those of the services every node offers for its parameters and types.
+/// Whether @p types are those of the standard per-node parameter and type description services.
 bool is_node_service(const std::vector<std::string>& types) {
     return !types.empty() && std::all_of(types.begin(), types.end(), [](const std::string& type) {
         return type.starts_with("rcl_interfaces/srv/") ||
@@ -38,13 +38,13 @@ std::string join_name(const std::string& space, const std::string& name) {
     return space.empty() || space == "/" ? "/" + name : space + "/" + name;
 }
 
-/// @p full split into namespace and name.
+/// Splits the fully qualified node name @p full into namespace and name.
 std::pair<std::string, std::string> split_node_name(const std::string& full) {
     const std::size_t slash = full.rfind('/');
     return {slash == 0 ? "/" : full.substr(0, slash), full.substr(slash + 1)};
 }
 
-/// Takes and frees @p names, as {name: types}.
+/// Converts @p names to {name: types} and finalizes it.
 std::map<std::string, std::vector<std::string>> take_names(rcl_names_and_types_t& names) {
     std::map<std::string, std::vector<std::string>> out;
     for (std::size_t i = 0; i < names.names.size; ++i) {
@@ -97,8 +97,8 @@ json qos_json(const rclcpp::QoS& qos) {
     return out;
 }
 
-/// Whether the middleware knows the node of @p endpoint yet. Node names arrive a moment after the
-/// node's endpoints are discovered; until then they read as placeholders.
+/// Whether the node name of @p endpoint is known. Discovery can report an endpoint before its
+/// node name, which is a _NODE_NAME_UNKNOWN_ placeholder until then.
 bool node_known(const rclcpp::TopicEndpointInfo& endpoint) {
     return endpoint.node_name().find("_NODE_NAME_UNKNOWN_") == std::string::npos;
 }
@@ -306,7 +306,7 @@ void ActionGoal::cancel() {
         try {
             client_->async_cancel_goal(handle);
         } catch (const std::exception&) {
-            // The goal finished in the meantime, and the client forgot it.
+            // The goal already finished and its handle is no longer tracked by the client.
         }
     }
 }
@@ -315,7 +315,7 @@ void ActionGoal::cancel() {
 
 Ros::Ros(const std::string& node_name, JsonLimits limits) : limits_(limits) {
     rclcpp::NodeOptions options;
-    // The node is a client of the graph; nobody needs to set its parameters.
+    // The node has no parameters of its own to serve.
     options.start_parameter_services(false);
     node_ = std::make_shared<rclcpp::Node>(node_name, options);
     executor_.add_node(node_);
@@ -476,7 +476,7 @@ json Ros::describe_interface(const std::string& type) {
                         "' is not a type name such as std_msgs/msg/String, std_srvs/srv/Trigger or "
                         "example_interfaces/action/Fibonacci");
     }
-    // A name without its kind, such as std_srvs/Trigger: try each kind.
+    // A name without a kind, such as std_srvs/Trigger: try message, service and action in turn.
     try {
         return message(type);
     } catch (const TypeError&) {
@@ -511,8 +511,8 @@ std::shared_ptr<const MessageType> Ros::topic_type(const std::string& topic,
 rclcpp::QoS Ros::subscription_qos(const std::string& topic, std::size_t depth,
                                   const QosRequest& request) const {
     rclcpp::QoS qos(depth);
-    // Match every publisher: reliable or transient-local only when all of them are. With no
-    // publisher yet, best effort matches whichever comes.
+    // Compatible with every publisher: reliable or transient-local only when all publishers are.
+    // Without publishers, best effort and volatile are compatible with any that appear later.
     const auto publishers = node_->get_publishers_info_by_topic(topic);
     bool reliable = !publishers.empty();
     bool transient_local = !publishers.empty();
@@ -539,7 +539,8 @@ rclcpp::QoS Ros::subscription_qos(const std::string& topic, std::size_t depth,
 rclcpp::QoS Ros::publisher_qos(const std::string& topic, const QosRequest& request) const {
     rclcpp::QoS qos(request.depth.value_or(10));
     qos.reliable();
-    // A transient-local subscriber, such as one of a map, only hears transient-local publishers.
+    // A transient-local subscriber, such as a map subscriber, only matches transient-local
+    // publishers.
     for (const auto& subscriber : node_->get_subscriptions_info_by_topic(topic)) {
         if (subscriber.qos_profile().durability() == rclcpp::DurabilityPolicy::TransientLocal) {
             qos.transient_local();

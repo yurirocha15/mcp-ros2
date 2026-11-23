@@ -39,8 +39,8 @@ find_package(tf2_ros REQUIRED)
 
 ament_package_xml()
 
-# The MCP C++ SDK: the installed package, as the ROS build farm provides it, or,
-# for development builds without it, a copy fetched from GitHub.
+# The MCP C++ SDK: the installed package (as on the ROS build farm), otherwise a
+# copy fetched from GitHub.
 find_package(mcp-cpp-sdk CONFIG QUIET)
 if(mcp-cpp-sdk_FOUND)
   if(TARGET mcp::sdk)
@@ -66,7 +66,7 @@ else()
     mcp-cpp-sdk
     GIT_REPOSITORY https://github.com/yurirocha15/mcp-cpp-sdk.git
     GIT_TAG ${MCP_ROS2_SDK_GIT_TAG})
-  # The SDK's own tests are not this package's.
+  # Do not build the SDK's tests as part of this package.
   set(BUILD_TESTING OFF)
   FetchContent_MakeAvailable(mcp-cpp-sdk)
   unset(BUILD_TESTING)

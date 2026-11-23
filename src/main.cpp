@@ -35,7 +35,7 @@ int replace(int from, int to) { return _dup2(from, to); }
 long long write_some(int fd, const char* data, std::size_t size) {
     return _write(fd, data, static_cast<unsigned int>(std::min<std::size_t>(size, 1U << 30)));
 }
-/// Messages end with a bare newline, not the CRLF a text-mode descriptor writes.
+/// Sets binary mode so that messages end in LF, not the CRLF of text mode.
 void binary(int fd) { _setmode(fd, _O_BINARY); }
 #else
 int duplicate(int fd) { return ::dup(fd); }
@@ -87,8 +87,8 @@ class DescriptorBuffer : public std::streambuf {
     char buffer_[1 << 16];
 };
 
-/// The protocol's own copy of standard output, with standard output itself sent to standard
-/// error, so that what the middleware and other libraries print cannot corrupt the message stream.
+/// Duplicates stdout for MCP messages and redirects stdout to stderr, so that output from the
+/// middleware and other libraries does not corrupt the message stream.
 class ProtocolOutput {
    public:
     ProtocolOutput() : fd_(duplicate(1)) {
@@ -109,7 +109,7 @@ class ProtocolOutput {
     std::unique_ptr<std::ostream> stream_;
 };
 
-/// Whether @p sent is @p token, compared in a time that does not depend on where they differ.
+/// Whether @p sent equals @p token, in a time that does not depend on the position of a mismatch.
 bool same_secret(std::string_view sent, std::string_view token) {
     unsigned char difference = sent.size() == token.size() ? 0 : 1;
     for (std::size_t i = 0; i < sent.size(); ++i) {
@@ -125,12 +125,12 @@ int run(const mcp_ros2::Options& options) {
         protocol = std::make_unique<ProtocolOutput>();
     }
 
-    // Destroyed in reverse order: the tools drop their subscriptions, the server stops, its
-    // handler thread ends, and the node stops spinning last.
+    // Destruction runs in reverse order: tools (and their subscriptions), server, handler thread,
+    // then the node and its spin thread.
     mcp_ros2::Ros ros(options.node_name, mcp_ros2::JsonLimits{options.max_array});
 
-    // The handlers are coroutines that wait for the node's thread on timers, so one thread serves
-    // them all.
+    // Handlers are coroutines that poll for the node thread's results on timers, so one runtime
+    // thread serves all of them.
     mcp::Runtime handlers;
     handlers.start(1);
 
@@ -171,8 +171,8 @@ int run(const mcp_ros2::Options& options) {
 
 int main(int argc, char** argv) {
     try {
-        // A signal ends the process at once, as for any stdio server; rclcpp's handlers would only
-        // stop ROS and leave the protocol running.
+        // Default signal handling terminates the process. rclcpp's handlers would shut down ROS
+        // but leave the MCP transport running.
         rclcpp::init(argc, argv, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None);
     } catch (const std::exception& error) {
         std::cerr << "mcp-ros2: " << error.what() << "\n";

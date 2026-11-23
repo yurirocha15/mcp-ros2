@@ -1,6 +1,5 @@
-// The server binary end to end: an MCP client launches it over stdio, as an agent's client does,
-// next to a node that stands in for a robot, with a topic it publishes, topics it listens to, a
-// service, an action, parameters and a static transform.
+// End-to-end tests of the server binary over stdio, against a test node (Robot) with a published
+// topic, subscribed topics, a service, an action, parameters and a static transform.
 
 #include <mcp/mcp.hpp>
 #include <mcp/transport/http_client.hpp>
@@ -49,7 +48,8 @@ using namespace std::chrono_literals;
 using Fibonacci = example_interfaces::action::Fibonacci;
 using FibonacciHandle = rclcpp_action::ServerGoalHandle<Fibonacci>;
 
-/// A node with a bit of everything a robot has.
+/// Test node with a publisher, subscriptions, a service, an action server, parameters and a
+/// static transform.
 class Robot {
    public:
     Robot() : node_(std::make_shared<rclcpp::Node>("test_robot")) {
@@ -223,7 +223,7 @@ bool wait_for(Ready ready, std::chrono::seconds timeout = 10s) {
     return true;
 }
 
-/// A program run next to the test, stopped when this goes away.
+/// A child process, stopped on destruction.
 class Child {
    public:
     explicit Child(const std::vector<std::string>& command) {
@@ -295,7 +295,8 @@ std::uint16_t free_port() {
 
 class ServerTest : public ::testing::Test {
    protected:
-    /// Starts the server and waits until it sees the robot's topics, service and action.
+    /// Starts the server and waits until its graph queries list the test node's topics, service
+    /// and action.
     void connect(const std::vector<std::string>& extra_args = {},
                  mcp::ClientProtocol protocol = mcp::ClientProtocol::automatic()) {
         std::vector<std::string> command{MCP_ROS2_BINARY};
@@ -350,7 +351,7 @@ TEST_F(ServerTest, ListsTheGraph) {
             EXPECT_GE(topic["publishers"], 1);
         }
     }
-    // Hidden topics and every node's parameter services are left out unless asked for.
+    // Hidden topics and the standard per-node services are excluded by default.
     EXPECT_FALSE(contains_name(topics, "/fibonacci/_action/feedback"));
     EXPECT_TRUE(contains_name(call("list_topics", {{"hidden", true}})["topics"],
                               "/fibonacci/_action/feedback"));
@@ -561,7 +562,7 @@ TEST_F(ServerTest, NotifiesSubscribersOfNewMessages) {
         }
     });
     client_->sync().send_request("resources/subscribe", json{{"uri", "ros://topic/chatter"}});
-    // At most one notice a second.
+    // At most one notification per second, the default notify interval.
     EXPECT_TRUE(wait_for([&updates] { return updates >= 2; }, 5s)) << updates;
     client_->sync().send_request("resources/unsubscribe", json{{"uri", "ros://topic/chatter"}});
 }
@@ -584,7 +585,7 @@ TEST_F(ServerTest, AllowAndDenyLimitWhatActs) {
                   .find("may not set parameters of /test_robot"),
               std::string::npos);
     EXPECT_DOUBLE_EQ(g_robot->node().get_parameter("speed").as_double(), 1.0);
-    // Reading is not limited.
+    // Access rules do not apply to the read tools.
     EXPECT_EQ(
         call("get_parameters", {{"node", "/test_robot"}, {"names", {"speed"}}})["parameters"]["speed"],
         1.0);

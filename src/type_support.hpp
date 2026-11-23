@@ -1,6 +1,6 @@
 #pragma once
 
-// ROS 2 interface types loaded by name at run time, and messages of those types in memory.
+// Run-time loading of ROS 2 interface type support by name, and messages allocated from it.
 
 #include <rosidl_runtime_c/message_type_support_struct.h>
 #include <rosidl_runtime_c/service_type_support_struct.h>
@@ -16,7 +16,7 @@
 
 namespace mcp_ros2 {
 
-/// A type name that does not name an installed interface.
+/// Thrown for a type name that does not name an installed interface.
 class TypeError : public std::runtime_error {
    public:
     using std::runtime_error::runtime_error;
@@ -43,7 +43,7 @@ struct ServiceType {
     const ServiceMembers* members = nullptr;
 };
 
-/// An action type, through the message types it is made of.
+/// An action type, as the message types it consists of.
 struct ActionType {
     std::string name;  ///< As `package/action/Name`.
     std::shared_ptr<const MessageType> goal;
@@ -79,7 +79,7 @@ std::string full_type_name(const std::string& name, const std::string& kind);
 /// The name of the type @p members describes, as `package/kind/Name`.
 std::string type_name(const MessageMembers& members);
 
-/// A message of a type known by its layout, in memory and initialized to its defaults.
+/// A message allocated from its introspection layout and initialized to its default values.
 class DynamicMessage {
    public:
     explicit DynamicMessage(const MessageMembers& members);

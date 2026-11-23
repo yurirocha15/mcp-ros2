@@ -7,8 +7,8 @@ ament_add_gtest(mcp_ros2_unit_tests access_test.cpp message_json_test.cpp
                 options_test.cpp)
 target_link_libraries(mcp_ros2_unit_tests mcp_ros2_core)
 
-# Each test starts the server and waits for discovery; the domain is kept to
-# this machine.
+# Each test starts the server and waits for discovery, hence the timeout.
+# Discovery is limited to this machine.
 ament_add_gtest(mcp_ros2_server_tests server_test.cpp TIMEOUT 300 ENV
                 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST)
 target_link_libraries(mcp_ros2_server_tests mcp_ros2_core

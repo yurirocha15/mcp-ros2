@@ -119,8 +119,8 @@ std::u16string utf8_to_utf16(const std::string& text) {
     return out;
 }
 
-/// @p value as JSON, which has no NaN or infinity: those become "nan", "inf" and "-inf", as
-/// from_json reads them.
+/// @p value as JSON. JSON has no NaN or infinity, so those become "nan", "inf" and "-inf", which
+/// from_json accepts.
 json real_json(double value) {
     if (std::isnan(value)) {
         return "nan";
@@ -410,7 +410,7 @@ void field_from_json(const MessageMember& member, const json& value, void* field
             try {
                 from_json(value[i], nested(member), member.get_function(field, i), now);
             } catch (const MessageError& error) {
-                // from_json names the field from the message's own root.
+                // The nested error path starts at the nested message; prefix it with this element.
                 const std::string what = error.what();
                 constexpr std::string_view whole = "the message";
                 throw MessageError(what.starts_with(whole) ? at + what.substr(whole.size())
@@ -554,7 +554,7 @@ void from_json(const json& value, const MessageMembers& members, void* data,
             field_from_json(*member, field_value, static_cast<char*>(data) + member->offset_, key, now);
         } catch (const MessageError& error) {
             const std::string what = error.what();
-            // A nested message reports its own field path; put this field in front of it.
+            // Prefix the nested message's field path with this field's name.
             if (member->type_id_ == ts::ROS_TYPE_MESSAGE && !member->is_array_ &&
                 !what.starts_with("the message")) {
                 throw MessageError(key + "." + what);

@@ -80,7 +80,7 @@ TEST(OptionsTest, NeedsATokenOffLoopback) {
 #endif
     EXPECT_FALSE(parse({"--transport=http", "--host=0.0.0.0"}).options);
     EXPECT_TRUE(parse({"--transport=http", "--host=0.0.0.0", "--token=t"}).options);
-    // Client certificates authenticate callers as well as a token does.
+    // A client CA also meets the authentication requirement off loopback.
     EXPECT_TRUE(parse({"--transport=http", "--host=0.0.0.0", "--tls-cert=c.pem", "--tls-key=k.pem",
                        "--tls-client-ca=ca.pem"})
                     .options);

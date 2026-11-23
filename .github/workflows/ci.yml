@@ -37,7 +37,7 @@ jobs:
         with:
           path: src/mcp_ros2
 
-      # mcp_cpp_sdk is not in the ROS index yet; without it installed, the build fetches the SDK.
+      # mcp_cpp_sdk is not in the rosdistro index; the build fetches the SDK when it is not installed.
       - name: Install dependencies
         run: |
           apt-get update
@@ -65,7 +65,7 @@ jobs:
           colcon test --event-handlers console_cohesion+ --return-code-on-test-failure
           colcon test-result --verbose
 
-      # The unit tests do not use the middleware; the end-to-end tests run again on each one.
+      # Only the end-to-end tests depend on the RMW, so only they run again for each RMW.
       - name: Test with Cyclone DDS
         env:
           RMW_IMPLEMENTATION: rmw_cyclonedds_cpp
@@ -102,8 +102,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Lyrical comes from its official Windows release. Jazzy's newest Windows release predates
-          # the generic action client, so Jazzy comes from RoboStack's conda packages instead.
+          # Lyrical: official Windows release. Jazzy: RoboStack, because the newest Jazzy Windows
+          # release predates rclcpp_action 28.1.18.
           - distro: jazzy
             source: robostack
             ros_setup: ""
@@ -115,9 +115,8 @@ jobs:
         with:
           path: src/mcp_ros2
 
-      # The steps of the ROS 2 Windows binary install: the dependencies come from the pixi
-      # environment ros2/ros2 publishes for the distribution, ROS 2 from the newest release that
-      # has a Windows archive (not every release does).
+      # Follows the ROS 2 Windows binary install: dependencies from the distribution's pixi.toml in
+      # ros2/ros2, ROS 2 from the newest release with a Windows archive (not every release has one).
       - name: Get ROS 2
         if: matrix.source == 'release'
         shell: pwsh
@@ -156,11 +155,10 @@ jobs:
           run-install: false
           cache: false
 
-      # The SDK also needs Boost and nlohmann/json. In the ROS release's environment, assimp depends
-      # on boost-cpp, which conda-forge's newer libboost-devel cannot be installed with, so Boost is
-      # boost-cpp there; that environment may also lack nlohmann/json. With RoboStack, Boost is
-      # libboost-devel, with the CMake package files CMake 4 looks for, and the ROS packages this
-      # package and its tests use come from the same environment.
+      # The SDK also needs Boost and nlohmann/json. The release environment's assimp depends on
+      # boost-cpp, which conflicts with libboost-devel, so that environment uses boost-cpp.
+      # RoboStack uses libboost-devel, whose CMake config files CMake 4 requires, and also provides
+      # the ROS packages.
       - name: Install the dependencies
         shell: pwsh
         working-directory: C:\pixi_ws
