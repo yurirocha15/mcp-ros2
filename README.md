@@ -153,14 +153,17 @@ pixi add ros-jazzy-ros-base ros-jazzy-tf2-ros ros-dev-tools cmake openssl nlohma
 ## Using it from an agent
 
 The server speaks MCP over standard input and output, so the client starts it. It needs the ROS
-environment of the system it joins, so source it first. For Claude Code:
+environment of the system it joins, so the command sources it first.
+[add-mcp](https://github.com/neon-solutions/add-mcp), which runs on Node.js, adds the server to MCP
+clients such as Claude Code, Codex, Cursor, Gemini CLI, OpenCode, VS Code and Zed. It finds the
+clients installed on this machine and asks which ones to set up:
 
 ```sh
-claude mcp add ros2 -- bash -c \
+npx add-mcp /bin/bash --name ros2 -g --args -c --args \
   "source /opt/ros/jazzy/setup.bash && source ~/mcp_ws/install/setup.bash && exec ros2 run mcp_ros2 mcp_ros2"
 ```
 
-For clients configured with JSON, such as Claude Desktop:
+Clients that read an `mcpServers` file take this entry:
 
 ```json
 {
